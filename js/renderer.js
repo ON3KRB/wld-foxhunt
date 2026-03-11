@@ -1,850 +1,714 @@
 /**
- * renderer.js - Main game canvas renderer (v2 - improved visuals + compat fixes)
+ * renderer.js - Main park canvas renderer
  * WLD FoxWave ARDF
  *
- * Changes vs v1:
- *  - roundRect() polyfill for Safari/Firefox <112
- *  - Richer tile rendering (grass variation, path gravel dots, water shimmer)
- *  - Player animation (walking bob)
- *  - Better tree crowns with highlight
- *  - Improved WLD tent scene
- *  - Smoother status bar
+ * Key design decisions:
+ *  - 40px tiles: paths clearly visible as distinct sandy strips
+ *  - Heavy contrast between PATH (#c8a460) and GRASS (#3a7a30) and TREE (#1a4a10)
+ *  - Player drawn with HIGH antenna (3× tile height above head) + receiver box
+ *  - Receiver mode shows handheld device with frequency display + loop antenna
+ *  - WLD tent area clearly rendered at player start
+ *  - NPC hunters drawn with antennas and callsign labels
+ *  - ON4BB VHF hint overlay
  */
-
 "use strict";
 
-// ─── roundRect polyfill ───────────────────────────────────────────────────────
+// roundRect polyfill
 if (!CanvasRenderingContext2D.prototype.roundRect) {
-    CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
-        r = Math.min(r, w / 2, h / 2);
+    CanvasRenderingContext2D.prototype.roundRect = function(x,y,w,h,r){
+        r = Math.min(r,w/2,h/2);
         this.beginPath();
-        this.moveTo(x + r, y);
-        this.lineTo(x + w - r, y);
-        this.arcTo(x + w, y, x + w, y + r, r);
-        this.lineTo(x + w, y + h - r);
-        this.arcTo(x + w, y + h, x + w - r, y + h, r);
-        this.lineTo(x + r, y + h);
-        this.arcTo(x, y + h, x, y + h - r, r);
-        this.lineTo(x, y + r);
-        this.arcTo(x, y, x + r, y, r);
-        this.closePath();
-        return this;
+        this.moveTo(x+r,y); this.lineTo(x+w-r,y); this.arcTo(x+w,y,x+w,y+r,r);
+        this.lineTo(x+w,y+h-r); this.arcTo(x+w,y+h,x+w-r,y+h,r);
+        this.lineTo(x+r,y+h); this.arcTo(x,y+h,x,y+h-r,r);
+        this.lineTo(x,y+r); this.arcTo(x,y,x+r,y,r);
+        this.closePath(); return this;
     };
 }
 
-// ─── Image assets ─────────────────────────────────────────────────────────────
 let _wldLogoImg   = null;
 let _startStopImg = null;
 let _foxImg       = null;
-let _assetsLoaded = false;
 
-function loadRendererAssets(callback) {
-    let pending = 3;
-    const done = () => { if (--pending === 0) { _assetsLoaded = true; if (callback) callback(); } };
-    _wldLogoImg   = new Image(); _wldLogoImg.onload   = done; _wldLogoImg.onerror   = done;
-    _startStopImg = new Image(); _startStopImg.onload = done; _startStopImg.onerror = done;
-    _foxImg       = new Image(); _foxImg.onload       = done; _foxImg.onerror       = done;
-    _wldLogoImg.src   = 'assets/wld-logo.png';
-    _startStopImg.src = 'assets/start-stop.png';
-    _foxImg.src       = 'assets/fox.png';
+function loadRendererAssets(cb) {
+    let n = 3;
+    const done = () => { if (--n === 0 && cb) cb(); };
+    (_wldLogoImg   = new Image()).onload = (_wldLogoImg.onerror   = done); _wldLogoImg.src   = 'assets/wld-logo.png';
+    (_startStopImg = new Image()).onload = (_startStopImg.onerror = done); _startStopImg.src = 'assets/start-stop.png';
+    (_foxImg       = new Image()).onload = (_foxImg.onerror       = done); _foxImg.src       = 'assets/fox.png';
 }
 
-// ─── Tile colour palette ──────────────────────────────────────────────────────
-const TILE_COLORS = {
-    [TILE.GRASS]:       '#4a7c3f',
-    [TILE.PATH]:        '#b8955a',
-    [TILE.TREE]:        '#2d5a1f',
-    [TILE.WATER]:       '#2b6cb0',
-    [TILE.BUILDING]:    '#7a5c2e',
-    [TILE.PLAYGROUND]:  '#d4770a',
-    [TILE.FOUNTAIN]:    '#3498db',
-    [TILE.TRAIN]:       '#b8955a',
-    [TILE.ZOO]:         '#5a8a2a',
-    [TILE.START]:       '#c8a800',
-    [TILE.DENSE_TREE]:  '#1a3a10',
-    [TILE.FLOWER]:      '#5a9e42',
-    [TILE.SHRUB]:       '#3a6a20',
+// ── Tile colours — high contrast palette ─────────────────────────────────────
+const TC = {
+    [TILE.GRASS]:       '#4a8a38',
+    [TILE.PATH]:        '#c8a460',   // sandy path — very distinct from grass
+    [TILE.TREE]:        '#1e5010',
+    [TILE.WATER]:       '#1a6aaa',
+    [TILE.BUILDING]:    '#8a6030',
+    [TILE.PLAYGROUND]:  '#d47820',
+    [TILE.FOUNTAIN]:    '#2090cc',
+    [TILE.TRAIN]:       '#b89050',   // slightly darker than PATH
+    [TILE.ZOO]:         '#5a9a2a',
+    [TILE.START]:       '#d4a800',   // golden start tile
+    [TILE.DENSE_TREE]:  '#0e3008',
+    [TILE.FLOWER]:      '#5aaa40',
+    [TILE.SHRUB]:       '#3a7020',
 };
 
-// ─── Main render ──────────────────────────────────────────────────────────────
-
-/**
- * Render the park view centred on the player.
- * @param {CanvasRenderingContext2D} ctx
- * @param {number} canvasW
- * @param {number} canvasH
- * @param {number} timestamp
- * @param {string} gameState
- */
-function renderMainView(ctx, canvasW, canvasH, timestamp, gameState) {
+// ── Main render ───────────────────────────────────────────────────────────────
+function renderMainView(ctx, W, H, timestamp, gameState) {
     const ts = CONFIG.TILE_SIZE_MAIN;
-    const px = Player.x;
-    const py = Player.y;
+    const px = Player.x, py = Player.y;
 
-    const camX = canvasW / 2 - px * ts - ts / 2;
-    const camY = canvasH / 2 - py * ts - ts / 2;
+    // Camera: centre on player tile centre
+    const camX = W / 2 - (px + 0.5) * ts;
+    const camY = H / 2 - (py + 0.5) * ts;
 
-    const tx0 = Math.floor(-camX / ts) - 1;
-    const ty0 = Math.floor(-camY / ts) - 1;
-    const tx1 = Math.ceil((canvasW - camX) / ts) + 1;
-    const ty1 = Math.ceil((canvasH - camY) / ts) + 1;
+    // Visible tile range (with margin)
+    const tx0 = Math.max(0, Math.floor(-camX / ts) - 1);
+    const ty0 = Math.max(0, Math.floor(-camY / ts) - 1);
+    const tx1 = Math.min(CONFIG.WORLD_WIDTH  - 1, Math.ceil((W - camX) / ts) + 1);
+    const ty1 = Math.min(CONFIG.WORLD_HEIGHT - 1, Math.ceil((H - camY) / ts) + 1);
 
-    ctx.clearRect(0, 0, canvasW, canvasH);
-
-    // ── Draw world (translated) ────────────────────────────────────────────
+    ctx.clearRect(0, 0, W, H);
     ctx.save();
     ctx.translate(camX, camY);
 
-    // Tiles
+    // 1. Tile pass
     for (let ty = ty0; ty <= ty1; ty++) {
         for (let tx = tx0; tx <= tx1; tx++) {
-            _drawTile(ctx, tx, ty, getTile(tx, ty), tx * ts, ty * ts, ts, timestamp);
+            _drawTile(ctx, tx, ty, ts, timestamp);
         }
     }
 
-    // Features
+    // 2. Features
     _drawWLDTent(ctx, ts, timestamp);
     _drawFountain(ctx, ts, timestamp);
-    _drawZooArea(ctx, ts, timestamp);
     _drawPlayground(ctx, ts);
+    _drawZoo(ctx, ts);
     _drawCafe(ctx, ts);
-    _drawTrainSprite(ctx, ts, timestamp);
+    _drawTouristTrain(ctx, ts, timestamp);
 
-    // Fox markers
+    // 3. Fox markers
     _drawFoxMarkers(ctx, ts, timestamp);
 
-    // Detection radius hint (glow around player when receiver active)
+    // 4. Receiver beam glow
     if (gameState === STATE.RECEIVER) {
-        _drawReceiverGlow(ctx, px * ts + ts / 2, py * ts + ts / 2, ts, timestamp);
+        _drawBeamGlow(ctx, (px+0.5)*ts, (py+0.5)*ts, ts, timestamp);
     }
 
-    // Player
-    _drawPlayer(ctx, px * ts + ts / 2, py * ts + ts / 2, ts, Player.facing, timestamp, gameState);
+    // 5. NPCs
+    for (const npc of getNPCs()) _drawNPC(ctx, npc, ts, timestamp, gameState);
+
+    // 6. Player (drawn last so on top)
+    _drawPlayer(ctx, (px+0.5)*ts, (py+0.5)*ts, ts, Player.facing, timestamp, gameState);
 
     ctx.restore();
 
-    // ── Screen-space overlays ──────────────────────────────────────────────
-    _drawVignette(ctx, canvasW, canvasH);
-    _drawStatusBar(ctx, canvasW, gameState, timestamp);
+    // 7. Screen-space overlays
+    _drawVignette(ctx, W, H);
+    _drawHUD(ctx, W, H, gameState, timestamp);
 
-    // "Return to tent!" banner when all foxes found
-    if (Player.allFoxesFound && gameState === STATE.HUNTING) {
-        _drawReturnBanner(ctx, canvasW, canvasH, timestamp);
+    // 8. ON4BB hint bubble
+    if (Player.hintVisible) _drawON4BBHint(ctx, W, H, timestamp);
+
+    // 9. "Return to tent" banner
+    if (Player.allFoxesFound && (gameState === STATE.HUNTING || gameState === STATE.FINISHED)) {
+        _drawReturnBanner(ctx, W, H, timestamp);
     }
 }
 
-// ─── Tile renderers ───────────────────────────────────────────────────────────
+// ── Tile drawing ──────────────────────────────────────────────────────────────
+function _drawTile(ctx, tx, ty, ts, timestamp) {
+    const tile = getTile(tx, ty);
+    const sx = tx * ts, sy = ty * ts;
 
-function _drawTile(ctx, tx, ty, tile, sx, sy, ts, timestamp) {
-    ctx.fillStyle = TILE_COLORS[tile] || TILE_COLORS[TILE.GRASS];
+    // Base fill
+    ctx.fillStyle = TC[tile] || TC[TILE.GRASS];
     ctx.fillRect(sx, sy, ts, ts);
 
     switch (tile) {
-        case TILE.GRASS:       _tileGrass(ctx, tx, ty, sx, sy, ts); break;
-        case TILE.PATH:        _tilePath(ctx, tx, ty, sx, sy, ts, false); break;
-        case TILE.TRAIN:       _tilePath(ctx, tx, ty, sx, sy, ts, true); break;
-        case TILE.TREE:        _tileTree(ctx, tx, ty, sx, sy, ts, false); break;
-        case TILE.DENSE_TREE:  _tileTree(ctx, tx, ty, sx, sy, ts, true); break;
-        case TILE.WATER:       _tileWater(ctx, sx, sy, ts, timestamp); break;
-        case TILE.FLOWER:      _tileFlower(ctx, tx, ty, sx, sy, ts); break;
-        case TILE.START:       _tileStart(ctx, sx, sy, ts, timestamp); break;
-        case TILE.FOUNTAIN:    _tileFountainBase(ctx, sx, sy, ts); break;
-        case TILE.ZOO:         _tileZoo(ctx, tx, ty, sx, sy, ts); break;
-        case TILE.PLAYGROUND:  _tilePlayground(ctx, tx, ty, sx, sy, ts); break;
-        case TILE.BUILDING:    _tileBuilding(ctx, sx, sy, ts); break;
+        case TILE.GRASS:
+        case TILE.FLOWER:
+            _tileGrass(ctx, tx, ty, sx, sy, ts, tile === TILE.FLOWER);
+            break;
+        case TILE.PATH:
+        case TILE.TRAIN:
+            _tilePath(ctx, tx, ty, sx, sy, ts, tile === TILE.TRAIN);
+            break;
+        case TILE.TREE:
+        case TILE.DENSE_TREE:
+        case TILE.SHRUB:
+            _tileTree(ctx, tx, ty, sx, sy, ts, tile);
+            break;
+        case TILE.WATER:
+            _tileWater(ctx, sx, sy, ts, timestamp);
+            break;
+        case TILE.START:
+            _tileStart(ctx, sx, sy, ts, timestamp);
+            break;
     }
 }
 
-function _tileGrass(ctx, tx, ty, sx, sy, ts) {
-    const h = (Math.sin(tx * 7.3 + ty * 13.1) * 0.5 + 0.5);
-    ctx.fillStyle = `hsl(112,${38 + h * 8}%,${28 + h * 7}%)`;
+function _tileGrass(ctx, tx, ty, sx, sy, ts, flower) {
+    // Slight colour variation
+    const v = ((tx * 7 + ty * 13) % 8 - 4) * 3;
+    ctx.fillStyle = `hsl(112,${flower?52:38}%,${32+v/10}%)`;
     ctx.fillRect(sx, sy, ts, ts);
-    // Sparse blade tufts
-    if ((tx * 31 + ty * 17) % 9 === 0) {
-        ctx.fillStyle = `hsl(112,45%,${24 + h * 6}%)`;
-        for (let b = 0; b < 3; b++) {
-            const bx = sx + 4 + (tx * 23 + ty * 7 + b * 11) % (ts - 8);
-            const by = sy + ts * 0.55;
-            ctx.fillRect(bx, by, 2, 5 + b);
+
+    if (flower && (tx*31+ty*17)%4===0) {
+        const fc = ['#ff88aa','#ffdd44','#ff6688','#ffffff','#ffaadd'];
+        for (let i=0;i<4;i++){
+            const fi=(tx*23+ty*41+i*7)%1000;
+            ctx.fillStyle=fc[i%fc.length];
+            ctx.beginPath();
+            ctx.arc(sx+4+(fi%(ts-8)), sy+4+((fi>>2)%(ts-8)), 2.5, 0, Math.PI*2);
+            ctx.fill();
         }
+    }
+    // Grass blades
+    if ((tx*31+ty*17)%9===0) {
+        ctx.fillStyle='rgba(0,0,0,0.12)';
+        ctx.fillRect(sx+ts*0.35, sy+ts*0.6, 2, 6);
+        ctx.fillRect(sx+ts*0.65, sy+ts*0.55, 2, 7);
     }
 }
 
 function _tilePath(ctx, tx, ty, sx, sy, ts, isTrain) {
-    // Base gravel
-    const base = isTrain ? '#c4a060' : '#b08040';
-    ctx.fillStyle = base;
-    ctx.fillRect(sx + 2, sy + 2, ts - 4, ts - 4);
+    // Base sandy colour already filled
+    // Gravel texture: small dots
+    ctx.fillStyle = isTrain ? 'rgba(0,0,0,0.10)' : 'rgba(0,0,0,0.08)';
+    for (let i=0; i<6; i++) {
+        const gx = sx + ((tx*17+i*31)%32) + 4;
+        const gy = sy + ((ty*13+i*23)%28) + 6;
+        ctx.beginPath(); ctx.arc(gx, gy, 1, 0, Math.PI*2); ctx.fill();
+    }
+    // Path edge darken
+    ctx.fillStyle = 'rgba(0,0,0,0.18)';
+    ctx.fillRect(sx, sy, ts, 2);
+    ctx.fillRect(sx, sy+ts-2, ts, 2);
+    ctx.fillRect(sx, sy, 2, ts);
+    ctx.fillRect(sx+ts-2, sy, 2, ts);
 
     if (isTrain) {
-        // Wooden sleepers
-        ctx.fillStyle = '#5a3a1a';
-        for (let i = 0; i < 4; i++) {
-            ctx.fillRect(sx + 2, sy + i * (ts / 3.5) + 2, ts - 4, ts / 6 - 1);
-        }
+        // Rail sleepers
+        ctx.fillStyle = 'rgba(80,40,10,0.45)';
+        for (let i=0; i<3; i++) ctx.fillRect(sx+2, sy + i*(ts/3)+4, ts-4, ts/6-1);
         // Rails
-        ctx.fillStyle = '#888';
-        ctx.fillRect(sx + ts * 0.18, sy, ts * 0.08, ts);
-        ctx.fillRect(sx + ts * 0.74, sy, ts * 0.08, ts);
-    } else {
-        // Gravel dots
-        ctx.fillStyle = 'rgba(0,0,0,0.08)';
-        for (let i = 0; i < 5; i++) {
-            const gx = sx + 4 + (tx * 17 + ty * 23 + i * 7) % (ts - 8);
-            const gy = sy + 4 + (tx * 11 + ty * 31 + i * 13) % (ts - 8);
-            ctx.beginPath(); ctx.arc(gx, gy, 1.5, 0, Math.PI * 2); ctx.fill();
-        }
+        ctx.fillStyle = 'rgba(100,100,100,0.6)';
+        ctx.fillRect(sx+ts*0.22, sy, ts*0.08, ts);
+        ctx.fillRect(sx+ts*0.70, sy, ts*0.08, ts);
     }
 }
 
-function _tileTree(ctx, tx, ty, sx, sy, ts, dense) {
-    ctx.fillStyle = dense ? '#0e1f08' : '#1a3a10';
+function _tileTree(ctx, tx, ty, sx, sy, ts, tile) {
+    const dense = tile === TILE.DENSE_TREE;
+    const shrub = tile === TILE.SHRUB;
+    ctx.fillStyle = dense ? '#0e3008' : shrub ? '#3a7020' : '#1e5010';
     ctx.fillRect(sx, sy, ts, ts);
 
-    const seed = tx * 17 + ty * 31;
-    const ox   = ((seed % 5) - 2) * 2;
-    const oy   = (((seed >> 3) % 5) - 2) * 2;
-    const cr   = ts * 0.40 + (seed % 4) - 1;
-    const cx   = sx + ts / 2 + ox;
-    const cy   = sy + ts / 2 + oy;
+    const seed = tx*17+ty*31;
+    const cr   = shrub ? ts*0.32 : ts*0.42 + (seed%4-2);
+    const ox   = (seed%5-2)*3, oy = ((seed>>3)%5-2)*3;
+    const cx_  = sx+ts/2+ox, cy_= sy+ts/2+oy;
 
-    // Shadow
-    ctx.beginPath();
-    ctx.ellipse(cx + 3, cy + 4, cr * 0.85, cr * 0.5, 0, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(0,0,0,0.25)';
-    ctx.fill();
-
-    // Crown gradient
-    const grad = ctx.createRadialGradient(cx - cr * 0.25, cy - cr * 0.25, cr * 0.1, cx, cy, cr);
-    grad.addColorStop(0,   dense ? '#3a6a20' : '#4a8a28');
-    grad.addColorStop(0.6, dense ? '#254a18' : '#32621c');
-    grad.addColorStop(1,   dense ? '#0e1f08' : '#1a3a10');
-    ctx.beginPath();
-    ctx.arc(cx, cy, cr, 0, Math.PI * 2);
-    ctx.fillStyle = grad;
-    ctx.fill();
+    const g = ctx.createRadialGradient(cx_-cr*0.3, cy_-cr*0.3, cr*0.1, cx_, cy_, cr);
+    g.addColorStop(0, dense ? '#2a6018' : shrub ? '#5a9030' : '#3a7a20');
+    g.addColorStop(1, dense ? '#0e3008' : shrub ? '#3a7020' : '#1e5010');
+    ctx.beginPath(); ctx.arc(cx_, cy_, cr, 0, Math.PI*2);
+    ctx.fillStyle = g; ctx.fill();
 
     // Highlight
-    ctx.beginPath();
-    ctx.arc(cx - cr * 0.28, cy - cr * 0.28, cr * 0.25, 0, Math.PI * 2);
-    ctx.fillStyle = dense ? 'rgba(80,140,40,0.3)' : 'rgba(100,180,50,0.3)';
-    ctx.fill();
+    ctx.beginPath(); ctx.arc(cx_-cr*0.28, cy_-cr*0.28, cr*0.22, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(255,255,255,0.07)'; ctx.fill();
 }
 
-function _tileWater(ctx, sx, sy, ts, timestamp) {
-    const t   = timestamp / 2000;
-    const ripX = Math.sin(sx / 50 + t) * 2;
-    const ripY = Math.cos(sy / 45 + t * 0.9) * 2;
-
-    const grad = ctx.createLinearGradient(sx, sy, sx + ts, sy + ts);
-    grad.addColorStop(0,   '#1a5a9f');
-    grad.addColorStop(0.5, `hsl(${210 + ripX * 3},60%,${32 + ripY}%)`);
-    grad.addColorStop(1,   '#134080');
-    ctx.fillStyle = grad;
-    ctx.fillRect(sx, sy, ts, ts);
-
-    // Ripple lines
-    const alpha = 0.15 + 0.08 * Math.sin(t * 2 + sx);
-    ctx.strokeStyle = `rgba(140,210,255,${alpha})`;
-    ctx.lineWidth = 1;
-    for (let i = 0; i < 2; i++) {
-        const ry = sy + ts * (0.35 + i * 0.3) + ripY;
-        ctx.beginPath();
-        ctx.moveTo(sx + 3, ry);
-        ctx.quadraticCurveTo(sx + ts / 2, ry + ripX, sx + ts - 3, ry);
-        ctx.stroke();
-    }
-
-    // Subtle surface highlight
-    ctx.fillStyle = `rgba(180,230,255,${0.04 + 0.03 * Math.sin(t + sx / 30)})`;
-    ctx.fillRect(sx, sy, ts, ts / 3);
+function _tileWater(ctx, sx, sy, ts, t) {
+    const wave = Math.sin(sx/38 + t/1600)*2 + Math.cos(sy/32 + t/1200)*1.5;
+    const g = ctx.createLinearGradient(sx,sy,sx+ts,sy+ts);
+    g.addColorStop(0,'#1a5fa0'); g.addColorStop(1,`hsl(210,65%,${33+wave}%)`);
+    ctx.fillStyle=g; ctx.fillRect(sx,sy,ts,ts);
+    ctx.strokeStyle='rgba(130,200,255,0.25)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(sx+4, sy+ts*0.38+wave); ctx.lineTo(sx+ts-4, sy+ts*0.38+wave); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx+8, sy+ts*0.65-wave*.5); ctx.lineTo(sx+ts-8, sy+ts*0.65-wave*.5); ctx.stroke();
 }
 
-function _tileFlower(ctx, tx, ty, sx, sy, ts) {
-    ctx.fillStyle = '#5a9e42';
-    ctx.fillRect(sx, sy, ts, ts);
-    const seed   = tx * 23 + ty * 41;
-    const colors = ['#ff88aa', '#ffdd44', '#ff6688', '#ffffff', '#ff99bb', '#aa88ff', '#ffaa44'];
-    for (let i = 0; i < 6; i++) {
-        const fi = (seed * (i + 7) * 1103515245 + 12345) & 0x7fffffff;
-        const fx = sx + 3 + fi % (ts - 6);
-        const fy = sy + 3 + (fi >> 6) % (ts - 6);
-        ctx.fillStyle = colors[fi % colors.length];
-        ctx.beginPath();
-        ctx.arc(fx, fy, 1.8 + (fi % 2), 0, Math.PI * 2);
-        ctx.fill();
+function _tileStart(ctx, sx, sy, ts, t) {
+    // Golden grid
+    ctx.fillStyle='#d4a800'; ctx.fillRect(sx,sy,ts,ts);
+    const pulse = 0.5+0.5*Math.sin(t/500);
+    ctx.fillStyle=`rgba(255,240,100,${0.15+pulse*0.15})`; ctx.fillRect(sx,sy,ts,ts);
+    ctx.strokeStyle='rgba(180,130,0,0.5)'; ctx.lineWidth=0.7;
+    for(let i=0;i<ts;i+=8){
+        ctx.beginPath();ctx.moveTo(sx+i,sy);ctx.lineTo(sx+i,sy+ts);ctx.stroke();
+        ctx.beginPath();ctx.moveTo(sx,sy+i);ctx.lineTo(sx+ts,sy+i);ctx.stroke();
     }
 }
 
-function _tileStart(ctx, sx, sy, ts, timestamp) {
-    ctx.fillStyle = '#d4a000';
-    ctx.fillRect(sx, sy, ts, ts);
-    // Animated pulsing border
-    const pulse = 0.5 + 0.5 * Math.sin(timestamp / 500);
-    ctx.strokeStyle = `rgba(255,255,120,${0.5 + pulse * 0.5})`;
-    ctx.lineWidth = 2 + pulse;
-    ctx.strokeRect(sx + 2, sy + 2, ts - 4, ts - 4);
-    // Checkerboard
-    for (let i = 0; i < ts; i += 12) {
-        for (let j = 0; j < ts; j += 12) {
-            if ((i + j) % 24 === 0) {
-                ctx.fillStyle = 'rgba(200,150,0,0.4)';
-                ctx.fillRect(sx + i, sy + j, 12, 12);
-            }
-        }
-    }
-}
+// ── WLD Tent ──────────────────────────────────────────────────────────────────
+function _drawWLDTent(ctx, ts, t) {
+    const tx=3, ty=55;
+    const sx=tx*ts, sy=ty*ts, tw=7*ts, th=4*ts;
 
-function _tileFountainBase(ctx, sx, sy, ts) {
-    ctx.fillStyle = '#2b8acc';
-    ctx.fillRect(sx, sy, ts, ts);
-    ctx.strokeStyle = '#5ab8ee';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(sx + 1, sy + 1, ts - 2, ts - 2);
-}
+    // Ground
+    ctx.fillStyle='#c8a800'; ctx.fillRect(sx-ts,sy-ts,tw+2*ts,th+ts*1.5);
 
-function _tileZoo(ctx, tx, ty, sx, sy, ts) {
-    ctx.fillStyle = '#4a7a25';
-    ctx.fillRect(sx, sy, ts, ts);
-}
-
-function _tilePlayground(ctx, tx, ty, sx, sy, ts) {
-    ctx.fillStyle = '#c06a05';
-    ctx.fillRect(sx, sy, ts, ts);
-    ctx.fillStyle = 'rgba(255,200,100,0.15)';
-    ctx.fillRect(sx, sy, ts, ts);
-}
-
-function _tileBuilding(ctx, sx, sy, ts) {
-    ctx.fillStyle = '#7a5c2e';
-    ctx.fillRect(sx, sy, ts, ts);
-    ctx.fillStyle = 'rgba(0,0,0,0.15)';
-    ctx.fillRect(sx, sy + ts - 4, ts, 4);
-    ctx.fillRect(sx + ts - 4, sy, 4, ts);
-}
-
-// ─── Feature objects ──────────────────────────────────────────────────────────
-
-function _drawWLDTent(ctx, ts, timestamp) {
-    const tx = 3, ty = 55;
-    const sx = tx * ts, sy = ty * ts;
-    const w  = 7 * ts, h = 4 * ts;
-
-    // Ground shadow
-    ctx.fillStyle = 'rgba(0,0,0,0.2)';
-    ctx.beginPath();
-    ctx.ellipse(sx + w / 2 + 6, sy + h + 8, w / 2 + 4, 10, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Tent body
-    const tentGrad = ctx.createLinearGradient(sx, sy, sx + w, sy + h);
-    tentGrad.addColorStop(0, '#1e5a9a');
-    tentGrad.addColorStop(1, '#0e3060');
-    ctx.fillStyle = tentGrad;
-    ctx.fillRect(sx, sy, w, h);
-
-    // Tent roof
-    ctx.beginPath();
-    ctx.moveTo(sx + w / 2, sy - ts * 1.8);
-    ctx.lineTo(sx - ts * 0.4, sy + 2);
-    ctx.lineTo(sx + w + ts * 0.4, sy + 2);
-    ctx.closePath();
-    const roofGrad = ctx.createLinearGradient(sx, sy - ts * 1.8, sx, sy);
-    roofGrad.addColorStop(0, '#cc1a1a');
-    roofGrad.addColorStop(1, '#8a1010');
-    ctx.fillStyle = roofGrad;
-    ctx.fill();
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-
-    // Tent flap (entrance)
-    ctx.fillStyle = '#0d2050';
-    ctx.fillRect(sx + w * 0.38, sy + h * 0.3, w * 0.24, h * 0.7);
-
-    // WLD logo
-    if (_wldLogoImg && _wldLogoImg.complete && _wldLogoImg.naturalWidth > 0) {
-        ctx.drawImage(_wldLogoImg, sx + 6, sy + 6, ts * 2.2, ts * 1.6);
-    } else {
-        ctx.fillStyle = '#ffd700';
-        ctx.font = `bold ${ts * 0.6}px "Orbitron", monospace`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('WLD', sx + ts * 1.2, sy + ts * 0.8);
-    }
+    // Table
+    ctx.fillStyle='#8a6020'; ctx.fillRect(sx+ts*0.5,sy+ts*0.8,tw-ts,ts*0.2);
+    ctx.fillStyle='#7a5010';
+    ctx.fillRect(sx+ts*0.6,sy+ts,ts*0.15,ts*0.8);
+    ctx.fillRect(sx+tw-ts*0.75,sy+ts,ts*0.15,ts*0.8);
 
     // Start/stop machine on table
-    const tableX = sx + ts * 2.4, tableY = sy + ts * 0.4;
-    // Table surface
-    ctx.fillStyle = '#5a4020';
-    ctx.fillRect(tableX - 6, tableY + ts * 1.5, ts * 4.5 + 12, 6);
-    ctx.fillStyle = '#4a3010';
-    ctx.fillRect(tableX, tableY + ts * 1.5 + 6, 6, ts * 0.4);
-    ctx.fillRect(tableX + ts * 4, tableY + ts * 1.5 + 6, 6, ts * 0.4);
-
-    if (_startStopImg && _startStopImg.complete && _startStopImg.naturalWidth > 0) {
-        ctx.save();
-        ctx.shadowColor = 'rgba(255,150,0,0.4)';
-        ctx.shadowBlur = 8;
-        ctx.drawImage(_startStopImg, tableX, tableY, ts * 4, ts * 1.5);
-        ctx.restore();
+    if(_startStopImg && _startStopImg.naturalWidth){
+        ctx.drawImage(_startStopImg, sx+ts*1.0, sy+ts*0.1, ts*4, ts*0.75);
     } else {
-        ctx.fillStyle = '#ddd';
-        ctx.fillRect(tableX, tableY, ts * 4, ts * 1.5);
-        ctx.fillStyle = '#1a1a1a';
-        ctx.fillRect(tableX + 4, tableY + ts * 0.35, ts * 4 - 8, ts * 0.8);
-        ctx.fillStyle = '#ff8800';
-        ctx.font = `bold ${ts * 0.38}px "Share Tech Mono", monospace`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('STOP  00:00:00', tableX + ts * 2, tableY + ts * 0.75);
+        ctx.fillStyle='#ddd'; ctx.fillRect(sx+ts*1.0,sy+ts*0.1,ts*4,ts*0.75);
+        ctx.fillStyle='#ff8800';
+        ctx.font=`bold ${ts*0.35}px "Share Tech Mono",monospace`;
+        ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillText('STOP  00:00', sx+ts*3, sy+ts*0.48);
+    }
+
+    // Tent body
+    ctx.fillStyle='rgba(20,60,150,0.9)'; ctx.fillRect(sx,sy+th*0.1,tw,th*0.9);
+
+    // Tent roof triangle
+    ctx.beginPath();
+    ctx.moveTo(sx+tw/2, sy-ts*1.2);
+    ctx.lineTo(sx-ts*0.3, sy+th*0.12);
+    ctx.lineTo(sx+tw+ts*0.3, sy+th*0.12);
+    ctx.closePath();
+    ctx.fillStyle='#cc1818'; ctx.fill();
+    ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke();
+
+    // WLD logo on tent
+    if(_wldLogoImg && _wldLogoImg.naturalWidth){
+        ctx.drawImage(_wldLogoImg, sx+ts*0.2, sy+th*0.15, ts*2, ts*1.5);
     }
 
     // Banner text
-    ctx.fillStyle = '#ffffff';
-    ctx.font = `bold ${ts * 0.28}px "Orbitron", monospace`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    ctx.fillText('WLD FoxWave ARDF', sx + w / 2, sy + h - ts * 0.85);
+    ctx.fillStyle='#ffd700';
+    ctx.font=`bold ${ts*0.38}px "Orbitron",monospace`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('WLD FoxWave ARDF', sx+tw/2, sy+th*0.6);
 
     // Antenna mast
-    ctx.strokeStyle = '#aaa';
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(sx + w - ts * 0.6, sy);
-    ctx.lineTo(sx + w - ts * 0.6, sy - ts * 3.5);
-    ctx.stroke();
-    // Cross-arms
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(sx + w - ts * 0.6 - ts * 0.6, sy - ts * 2.8);
-    ctx.lineTo(sx + w - ts * 0.6 + ts * 0.6, sy - ts * 2.8);
-    ctx.stroke();
-
-    // Animated radio waves
-    const t = timestamp / 700;
-    for (let i = 1; i <= 4; i++) {
-        const age   = ((t + i * 0.5) % 4) / 4;
-        const alpha = Math.max(0, 1 - age * 1.5) * 0.7;
-        const rad   = i * 12 + age * 30;
-        ctx.strokeStyle = `rgba(255,215,0,${alpha})`;
-        ctx.lineWidth   = 2 - age;
-        ctx.beginPath();
-        ctx.arc(sx + w - ts * 0.6, sy - ts * 2.8, rad, -Math.PI * 0.65, -Math.PI * 0.05);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(sx + w - ts * 0.6, sy - ts * 2.8, rad, -Math.PI * 0.95, -Math.PI * 0.35);
-        ctx.stroke();
+    ctx.strokeStyle='#aaa'; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.moveTo(sx+tw-ts*0.5,sy+th*0.1); ctx.lineTo(sx+tw-ts*0.5,sy-ts*3); ctx.stroke();
+    // Signal rings
+    for(let i=1;i<=3;i++){
+        const a=Math.max(0,Math.sin(t/600-i*0.5))*0.55;
+        ctx.strokeStyle=`rgba(255,215,0,${a})`; ctx.lineWidth=1.5;
+        ctx.beginPath(); ctx.arc(sx+tw-ts*0.5,sy-ts*3,i*9,-Math.PI*0.65,-Math.PI*0.1); ctx.stroke();
+        ctx.beginPath(); ctx.arc(sx+tw-ts*0.5,sy-ts*3,i*9,-Math.PI*0.9,-Math.PI*0.35); ctx.stroke();
     }
 
-    ctx.textBaseline = 'alphabetic';
+    ctx.textBaseline='alphabetic';
 }
 
-function _drawFountain(ctx, ts, timestamp) {
-    const cx = 49 * ts + ts / 2;
-    const cy = 22 * ts + ts / 2;
-    const t  = timestamp / 1400;
-    const r  = ts * 2.2;
-
-    // Basin rim
-    ctx.beginPath();
-    ctx.arc(cx, cy, r + 5, 0, Math.PI * 2);
-    ctx.fillStyle = '#8aabb8';
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fillStyle = '#1a7abf';
-    ctx.fill();
-
-    // Water shimmer
-    ctx.strokeStyle = 'rgba(180,230,255,0.3)';
-    ctx.lineWidth = 2;
-    for (let i = 0; i < 5; i++) {
-        const a = (i / 5) * Math.PI * 2 + t * 0.3;
-        const rx = cx + Math.cos(a) * r * 0.5;
-        const ry = cy + Math.sin(a) * r * 0.3;
-        ctx.beginPath(); ctx.arc(rx, ry, r * 0.15 + Math.sin(t * 2 + i) * 3, 0, Math.PI * 2); ctx.stroke();
-    }
-
-    // Jets
-    for (let i = 0; i < 8; i++) {
-        const a   = (i / 8) * Math.PI * 2 + t * 0.2;
-        const jh  = ts * 0.9 + Math.sin(t * 3 + i * 1.3) * ts * 0.25;
-        const jx1 = cx + Math.cos(a) * ts * 0.35;
-        const jy1 = cy + Math.sin(a) * ts * 0.35;
-        const jx2 = cx + Math.cos(a) * ts * 0.8;
-        const jy2 = cy + Math.sin(a) * ts * 0.8 - jh;
-        ctx.strokeStyle = `rgba(160,220,255,${0.6 + Math.sin(t + i) * 0.2})`;
-        ctx.lineWidth = 2;
+// ── Fountain ──────────────────────────────────────────────────────────────────
+function _drawFountain(ctx, ts, t) {
+    const cx=49.5*ts, cy=22.5*ts;
+    ctx.beginPath(); ctx.arc(cx,cy,ts*2.2,0,Math.PI*2);
+    ctx.fillStyle='#1a6aaa'; ctx.fill();
+    ctx.strokeStyle='#6ab4e8'; ctx.lineWidth=3; ctx.stroke();
+    for(let i=0;i<8;i++){
+        const a=(i/8)*Math.PI*2+t/1200, jh=ts*0.85+Math.sin(t/400+i)*ts*0.18;
+        ctx.strokeStyle='rgba(140,210,255,0.65)'; ctx.lineWidth=2;
         ctx.beginPath();
-        ctx.moveTo(jx1, jy1);
-        ctx.quadraticCurveTo((jx1 + jx2) / 2, jy1 - jh * 0.6, jx2, jy2);
+        ctx.moveTo(cx+Math.cos(a)*ts*0.4, cy+Math.sin(a)*ts*0.4);
+        ctx.quadraticCurveTo(cx+Math.cos(a)*ts*0.9, cy+Math.sin(a)*ts*0.9-jh*0.4, cx+Math.cos(a)*ts*0.8, cy+Math.sin(a)*ts*0.8-jh);
         ctx.stroke();
-        // Droplet
-        ctx.beginPath();
-        ctx.arc(jx2, jy2, 2, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(200,235,255,0.7)';
-        ctx.fill();
     }
-
-    // Centre spout
-    ctx.beginPath();
-    ctx.arc(cx, cy, ts * 0.28, 0, Math.PI * 2);
-    ctx.fillStyle = '#5bc8ee';
-    ctx.fill();
-    ctx.strokeStyle = '#8ad8f8';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-
-    // Label
-    ctx.fillStyle = '#d4f4ff';
-    ctx.font = `bold ${ts * 0.35}px "Orbitron", monospace`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'bottom';
-    ctx.fillText('FONTEIN', cx, cy - r - 4);
-    ctx.textBaseline = 'alphabetic';
-}
-
-function _drawZooArea(ctx, ts, timestamp) {
-    const x1 = 61 * ts, y1 = 6 * ts, x2 = 75 * ts, y2 = 15 * ts;
-    const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
-
-    // Fence
-    ctx.strokeStyle = '#8B6914';
-    ctx.lineWidth = 3;
-    ctx.setLineDash([7, 5]);
-    ctx.strokeRect(x1 + 3, y1 + 3, x2 - x1 - 6, y2 - y1 - 6);
-    ctx.setLineDash([]);
-
-    // Fence posts
-    ctx.fillStyle = '#6a4a10';
-    for (let fx = x1 + 3; fx <= x2 - 3; fx += ts) {
-        ctx.fillRect(fx - 3, y1, 6, 10);
-        ctx.fillRect(fx - 3, y2 - 10, 6, 10);
-    }
-
-    // Animals (emoji, always fun)
-    ctx.font = `${ts * 0.7}px serif`;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    const animals = ['🦁','🦒','🐘','🦓'];
-    for (let i = 0; i < animals.length; i++) {
-        const ax = x1 + ts * 1.5 + i * ts * 2.5;
-        const ay = cy + Math.sin(timestamp / 1200 + i) * 4;
-        ctx.fillText(animals[i], ax, ay);
-    }
-
-    ctx.fillStyle = '#ffd700';
-    ctx.font = `bold ${ts * 0.45}px "Orbitron", monospace`;
-    ctx.fillText('🐾 DIERENPARK', cx, y2 - ts * 0.35);
-    ctx.textBaseline = 'alphabetic';
+    ctx.beginPath(); ctx.arc(cx,cy,ts*0.3,0,Math.PI*2);
+    ctx.fillStyle='#4db8e8'; ctx.fill();
+    ctx.fillStyle='#44aaff';
+    ctx.font=`bold ${ts*0.5}px "Orbitron",monospace`;
+    ctx.textAlign='center'; ctx.textBaseline='bottom';
+    ctx.fillText('⛲', cx, cy-ts*2.3);
+    ctx.textBaseline='alphabetic';
 }
 
 function _drawPlayground(ctx, ts) {
-    const x1 = 4 * ts, y1 = 6 * ts, x2 = 17 * ts, y2 = 15 * ts;
-    const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
+    const cx=(4+17)/2*ts, cy=(6+15)/2*ts;
+    ctx.fillStyle='#ffd700';
+    ctx.font=`bold ${ts*0.55}px "Orbitron",monospace`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('🎠 SPEELTUIN', cx, cy);
+    ctx.fillStyle='#d4770a';
+    ctx.font=`${ts*0.35}px "Share Tech Mono",monospace`;
+    ctx.fillText('Speelpark', cx, cy+ts*0.7);
+    ctx.textBaseline='alphabetic';
+}
 
-    // Swingset frame
-    ctx.strokeStyle = '#7a4a00';
-    ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.moveTo(x1 + ts, y1 + ts); ctx.lineTo(x1 + ts, cy + ts); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(x1 + ts * 2, y1 + ts); ctx.lineTo(x1 + ts * 2, cy + ts); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(x1 + ts * 0.6, y1 + ts); ctx.lineTo(x1 + ts * 2.4, y1 + ts); ctx.stroke();
-    // Swing seat
-    ctx.fillStyle = '#cc5500';
-    ctx.fillRect(x1 + ts * 0.7, cy + ts * 0.3, ts * 1.6, ts * 0.2);
-
-    // Slide
-    ctx.strokeStyle = '#dd4400'; ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.moveTo(cx + ts * 0.5, y1 + ts * 0.5);
-    ctx.lineTo(cx + ts * 2, cy + ts);
-    ctx.stroke();
-
-    // Sandbox
-    ctx.fillStyle = '#e8c870';
-    ctx.beginPath(); ctx.arc(cx - ts * 0.5, cy + ts * 0.8, ts * 0.6, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = '#c8a050'; ctx.lineWidth = 2; ctx.stroke();
-
-    // Label
-    ctx.fillStyle = '#fff';
-    ctx.font = `bold ${ts * 0.38}px "Orbitron", monospace`;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-    ctx.fillText('🎠 SPEELTUIN', cx, y2 - 4);
-    ctx.textBaseline = 'alphabetic';
+function _drawZoo(ctx, ts) {
+    const cx=(61+75)/2*ts, cy=(6+15)/2*ts;
+    ctx.strokeStyle='#8B6914'; ctx.lineWidth=3;
+    ctx.setLineDash([5,4]); ctx.strokeRect(61*ts+2,6*ts+2,(75-61)*ts-4,(15-6)*ts-4); ctx.setLineDash([]);
+    ctx.fillStyle='#ffd700';
+    ctx.font=`bold ${ts*0.55}px "Orbitron",monospace`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('🦁 ZOO', cx, cy);
+    ctx.textBaseline='alphabetic';
 }
 
 function _drawCafe(ctx, ts) {
-    const x1 = 61 * ts, y1 = 43 * ts, x2 = 75 * ts, y2 = 53 * ts;
-    const cx = (x1 + x2) / 2;
-
-    // Roof/awning
-    ctx.fillStyle = '#c01818';
-    ctx.fillRect(x1 - 6, y1 - ts * 0.4, x2 - x1 + 12, ts * 0.55);
-    for (let i = 0; i < 9; i++) {
-        if (i % 2 === 0) {
-            const ax = x1 - 6 + i * ((x2 - x1 + 12) / 9);
-            ctx.fillStyle = '#fff';
-            ctx.fillRect(ax, y1 - ts * 0.4, (x2 - x1 + 12) / 9, ts * 0.55);
-        }
-    }
-
-    // Facade
-    const facadeGrad = ctx.createLinearGradient(x1, y1, x1, y2);
-    facadeGrad.addColorStop(0, '#9a7230');
-    facadeGrad.addColorStop(1, '#6a4a18');
-    ctx.fillStyle = facadeGrad;
-    ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
-
-    // Windows with reflection
-    const winH = ts * 0.9, winW = ts * 0.9;
-    [[x1 + ts * 0.4, y1 + ts * 0.5],
-     [x1 + ts * 1.8, y1 + ts * 0.5],
-     [x1 + ts * 3.2, y1 + ts * 0.5]].forEach(([wx, wy]) => {
-        ctx.fillStyle = '#87ceeb';
-        ctx.fillRect(wx, wy, winW, winH);
-        ctx.fillStyle = 'rgba(255,255,255,0.3)';
-        ctx.fillRect(wx, wy, winW * 0.4, winH);
-        ctx.strokeStyle = '#5a3a10'; ctx.lineWidth = 2;
-        ctx.strokeRect(wx, wy, winW, winH);
+    const x1=61*ts,y1=43*ts,x2=75*ts,y2=53*ts,cx=(x1+x2)/2;
+    ctx.fillStyle='#8a6030'; ctx.fillRect(x1,y1,x2-x1,y2-y1);
+    ctx.fillStyle='#cc2020'; ctx.fillRect(x1-4,y1-ts*0.35,x2-x1+8,ts*0.5);
+    ctx.fillStyle='#87ceeb';
+    [[x1+ts*0.4,y1+ts*0.5],[x1+ts*1.9,y1+ts*0.5],[x1+ts*3.3,y1+ts*0.5]].forEach(([wx,wy])=>{
+        ctx.fillRect(wx,wy,ts*0.9,ts*0.9);
+        ctx.strokeStyle='#5a3a10'; ctx.lineWidth=2; ctx.strokeRect(wx,wy,ts*0.9,ts*0.9);
     });
-
-    // Door
-    ctx.fillStyle = '#4a2a08';
-    ctx.fillRect(cx - ts * 0.45, y2 - ts * 1.6, ts * 0.9, ts * 1.6);
-    ctx.fillStyle = '#d4a840';
-    ctx.beginPath(); ctx.arc(cx + ts * 0.25, y2 - ts * 0.8, 3, 0, Math.PI * 2); ctx.fill();
-
-    // Sign
-    ctx.fillStyle = '#ffd700';
-    ctx.font = `bold ${ts * 0.42}px "Orbitron", monospace`;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText('☕ BRASSERIE', cx, y1 + ts * 1.95);
-    ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle='#4a2a08'; ctx.fillRect(cx-ts*0.45,y2-ts*1.5,ts*0.9,ts*1.5);
+    ctx.fillStyle='#ffd700';
+    ctx.font=`bold ${ts*0.42}px "Orbitron",monospace`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('☕ BRASSERIE', cx, y1+ts*1.9);
+    ctx.textBaseline='alphabetic';
 }
 
-function _drawTrainSprite(ctx, ts, timestamp) {
-    const totalLen = (73 + 49 + 73 + 49);
-    const speed    = totalLen / 12; // tiles per second
-    const pos      = ((timestamp / 1000 * speed / totalLen) % 1) * totalLen;
+function _drawTouristTrain(ctx, ts, t) {
+    const total=244, speed=18;
+    const pos=((t/1000)*speed/total%1)*total;
+    let bx,by,ang;
+    if(pos<73){bx=3+pos;by=5;ang=90;}
+    else if(pos<122){bx=76;by=5+pos-73;ang=180;}
+    else if(pos<195){bx=76-(pos-122);by=54;ang=270;}
+    else{bx=3;by=54-(pos-195);ang=0;}
 
-    let bx, by, bearing;
-    if      (pos < 73)         { bx = 3 + pos;           by = 5;             bearing = 90;  }
-    else if (pos < 73 + 49)    { bx = 76;                by = 5 + pos - 73;  bearing = 180; }
-    else if (pos < 73 + 49 + 73){ bx = 76 - (pos - 122); by = 54;            bearing = 270; }
-    else                        { bx = 3;                 by = 54 - (pos - 195); bearing = 0; }
-
-    const sx = bx * ts, sy = by * ts;
     ctx.save();
-    ctx.translate(sx + ts / 2, sy + ts / 2);
-    ctx.rotate(bearing * Math.PI / 180);
-
-    const w = ts * 1.8, h = ts * 0.72;
-    // Body
-    ctx.fillStyle = '#cc1a1a';
-    ctx.roundRect(-w / 2, -h / 2, w, h, 5);
-    ctx.fill();
-    // Windows
-    ctx.fillStyle = '#87ceeb';
-    for (let i = 0; i < 3; i++) {
-        ctx.fillRect(-w / 2 + 6 + i * (w / 3.2), -h / 2 + 5, w / 4.2, h - 10);
-    }
-    // Wheels
-    ctx.fillStyle = '#222';
-    for (const wx of [-w * 0.32, w * 0.22]) {
-        ctx.beginPath(); ctx.arc(wx, h / 2, 4, 0, Math.PI * 2); ctx.fill();
-    }
-    // Front light
-    ctx.fillStyle = '#ffee88';
-    ctx.beginPath(); ctx.arc(w / 2 - 3, 0, 4, 0, Math.PI * 2); ctx.fill();
-
+    ctx.translate((bx+0.5)*ts,(by+0.5)*ts);
+    ctx.rotate(ang*Math.PI/180);
+    const w=ts*1.8,h=ts*0.68;
+    ctx.fillStyle='#cc1818'; ctx.roundRect(-w/2,-h/2,w,h,5); ctx.fill();
+    ctx.fillStyle='#87ceeb';
+    for(let i=0;i<3;i++) ctx.fillRect(-w/2+5+i*(w/3.2),-h/2+5,w/4.2,h-10);
+    ctx.fillStyle='#222';
+    for(const wx of[-w*0.32,w*0.22]){ctx.beginPath();ctx.arc(wx,h/2,4,0,Math.PI*2);ctx.fill();}
+    ctx.fillStyle='#ffee88'; ctx.beginPath();ctx.arc(w/2-3,0,4,0,Math.PI*2);ctx.fill();
     ctx.restore();
 }
 
-// ─── Fox markers ──────────────────────────────────────────────────────────────
-
-function _drawFoxMarkers(ctx, ts, timestamp) {
-    for (const beacon of getBeacons()) {
-        const dist = Math.hypot(beacon.x - Player.x, beacon.y - Player.y);
-        if (beacon.found) {
-            _drawFoundFlag(ctx, beacon.x * ts + ts / 2, beacon.y * ts + ts / 2, ts, beacon, timestamp);
-        } else if (dist <= CONFIG.FOX_DETECTION_RADIUS + 3) {
-            // Proximity glow
-            const pct   = 1 - dist / (CONFIG.FOX_DETECTION_RADIUS + 3);
-            const pulse = Math.abs(Math.sin(timestamp / 350));
-            ctx.beginPath();
-            ctx.arc(beacon.x * ts + ts / 2, beacon.y * ts + ts / 2, ts * 1.5 * pct, 0, Math.PI * 2);
-            ctx.fillStyle = `rgba(255,215,0,${pct * pulse * 0.5})`;
-            ctx.fill();
+// ── Fox markers ───────────────────────────────────────────────────────────────
+function _drawFoxMarkers(ctx, ts, t) {
+    for (const b of getBeacons()) {
+        const dist=Math.hypot(b.x-Player.x, b.y-Player.y);
+        const cx=b.x*ts+ts/2, cy=b.y*ts+ts/2;
+        if (b.found) {
+            // Flag post
+            ctx.strokeStyle='#888'; ctx.lineWidth=2;
+            ctx.beginPath();ctx.moveTo(cx,cy+ts*0.4);ctx.lineTo(cx,cy-ts*0.5);ctx.stroke();
+            ctx.fillStyle=b.color;
+            ctx.beginPath();ctx.moveTo(cx,cy-ts*0.5);ctx.lineTo(cx+ts*0.6,cy-ts*0.2);ctx.lineTo(cx,cy+ts*0.05);ctx.closePath();ctx.fill();
+            ctx.fillStyle='#fff';
+            ctx.font=`bold ${ts*0.3}px "Orbitron",monospace`;
+            ctx.textAlign='center'; ctx.textBaseline='bottom';
+            ctx.fillText(b.code,cx,cy-ts*0.5);
+            ctx.textBaseline='alphabetic';
+        } else if (dist<CONFIG.FOX_DETECTION_RADIUS+2) {
+            const pct=1-dist/(CONFIG.FOX_DETECTION_RADIUS+2);
+            const pulse=Math.abs(Math.sin(t/350));
+            ctx.beginPath(); ctx.arc(cx,cy,ts*1.4*pct,0,Math.PI*2);
+            ctx.fillStyle=`rgba(255,215,0,${pct*pulse*0.55})`; ctx.fill();
         }
     }
 }
 
-function _drawFoundFlag(ctx, sx, sy, ts, beacon, timestamp) {
-    // Pole
-    ctx.strokeStyle = '#ccc'; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(sx, sy + ts * 0.4); ctx.lineTo(sx, sy - ts * 0.7); ctx.stroke();
-    // Flag wave
-    const wave = Math.sin(timestamp / 400) * 3;
-    ctx.fillStyle = beacon.color;
-    ctx.beginPath();
-    ctx.moveTo(sx, sy - ts * 0.7);
-    ctx.quadraticCurveTo(sx + ts * 0.5 + wave, sy - ts * 0.5 + wave * 0.3, sx + ts * 0.5, sy - ts * 0.3);
-    ctx.lineTo(sx, sy - ts * 0.3);
-    ctx.closePath();
-    ctx.fill();
-    // Fox emoji
-    ctx.font = `${ts * 0.55}px serif`;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    ctx.fillText('🦊', sx, sy - ts * 0.2);
-    ctx.textBaseline = 'alphabetic';
+// ── Receiver beam glow ────────────────────────────────────────────────────────
+function _drawBeamGlow(ctx, px, py, ts, t) {
+    const pulse=0.35+0.25*Math.sin(t/300);
+    const brg=Player.receiverBearing;
+    const hw=CONFIG.RECEIVER_BEAMWIDTH;
+    const a0=(brg-hw-90)*Math.PI/180, a1=(brg+hw-90)*Math.PI/180;
+    const r=ts*CONFIG.FOX_AUDIO_RADIUS*0.32;
+    const g=ctx.createRadialGradient(px,py,0,px,py,r);
+    g.addColorStop(0,`rgba(74,222,128,${pulse*0.4})`);
+    g.addColorStop(0.6,`rgba(74,222,128,${pulse*0.12})`);
+    g.addColorStop(1,'rgba(74,222,128,0)');
+    ctx.beginPath(); ctx.moveTo(px,py); ctx.arc(px,py,r,a0,a1); ctx.closePath();
+    ctx.fillStyle=g; ctx.fill();
 }
 
-// ─── Player ───────────────────────────────────────────────────────────────────
-
-function _drawPlayer(ctx, px, py, ts, facing, timestamp, gameState) {
-    const r   = ts * 0.30;
-    const bob = (gameState === STATE.HUNTING)
-              ? Math.sin(timestamp / 140) * 2  // walking bob
-              : 0;
+// ── Player ────────────────────────────────────────────────────────────────────
+function _drawPlayer(ctx, px, py, ts, facing, t, gameState) {
+    const R = ts * 0.28;  // body radius
+    const isReceiver = gameState === STATE.RECEIVER;
+    const bob = (gameState === STATE.HUNTING) ? Math.sin(t/140)*1.8 : 0;
 
     ctx.save();
     ctx.translate(px, py + bob);
     ctx.rotate(facing * Math.PI / 180);
 
-    // Shadow
-    ctx.fillStyle = 'rgba(0,0,0,0.25)';
-    ctx.beginPath();
-    ctx.ellipse(2, r * 0.5 - bob, r * 0.65, r * 0.22, 0, 0, Math.PI * 2);
+    // ── Antenna (drawn first, so behind head) ─────────────────────────────────
+    // Yagi-style: long boom + 3 elements, extends 3× tile height above player
+    const antBase = -R * 1.2;          // just above head
+    const antTop  = -R * 1.2 - ts * 2.8; // HIGH up — very visible
+
+    if (isReceiver) {
+        // Loop antenna in receiver mode: large circle on a stick
+        ctx.strokeStyle = '#e8e8e8'; ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.moveTo(0, antBase); ctx.lineTo(0, antBase - ts*0.8); ctx.stroke();
+        // Loop
+        ctx.beginPath(); ctx.arc(0, antBase - ts*0.8 - ts*0.55, ts*0.55, 0, Math.PI*2);
+        ctx.strokeStyle = '#ffdd44'; ctx.lineWidth = 3; ctx.stroke();
+        // Loop fill tint
+        ctx.fillStyle='rgba(255,220,60,0.08)'; ctx.fill();
+        // Centre cross
+        ctx.strokeStyle='#ffdd44'; ctx.lineWidth=1.5;
+        ctx.beginPath(); ctx.moveTo(-ts*0.3,antBase-ts*1.35); ctx.lineTo(ts*0.3,antBase-ts*1.35); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0,antBase-ts*0.8-ts*0.1); ctx.lineTo(0,antBase-ts*1.6); ctx.stroke();
+    } else {
+        // Yagi directional antenna
+        ctx.strokeStyle = '#cccccc'; ctx.lineWidth = 2.5;
+        // Boom
+        ctx.beginPath(); ctx.moveTo(0, antBase); ctx.lineTo(0, antTop); ctx.stroke();
+        // Elements (directors)
+        const elemPositions = [0.25, 0.50, 0.75];
+        const elemLengths   = [ts*0.55, ts*0.48, ts*0.40];
+        for (let i=0; i<3; i++) {
+            const ey = antBase + (antTop - antBase) * elemPositions[i];
+            const ew = elemLengths[i];
+            ctx.strokeStyle = i===0 ? '#ffdd44' : '#aaaaaa';
+            ctx.lineWidth = i===0 ? 3 : 2;
+            ctx.beginPath(); ctx.moveTo(-ew/2, ey); ctx.lineTo(ew/2, ey); ctx.stroke();
+        }
+        // Reflector (base, longest)
+        ctx.strokeStyle='#888888'; ctx.lineWidth=2;
+        ctx.beginPath(); ctx.moveTo(-ts*0.28, antBase+2); ctx.lineTo(ts*0.28, antBase+2); ctx.stroke();
+    }
+
+    // ── Receiver device (in hand) ─────────────────────────────────────────────
+    const devX = R * 0.6, devY = -R * 0.1;
+    const devW = R * 0.95, devH = R * 0.65;
+
+    // Device body
+    ctx.fillStyle = '#2a2a2a';
+    ctx.roundRect(devX, devY - devH/2, devW, devH, 3);
     ctx.fill();
+    ctx.strokeStyle = '#555'; ctx.lineWidth = 1; ctx.stroke();
+
+    // LCD screen
+    ctx.fillStyle = '#001100';
+    ctx.fillRect(devX + 3, devY - devH/2 + 3, devW - 6, devH*0.55);
+    ctx.fillStyle = '#00ff44';
+    ctx.font = `bold ${devH*0.28}px "Share Tech Mono",monospace`;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillText(isReceiver ? '3.560' : '80m', devX+4, devY-devH/2+4);
+
+    // Knob
+    ctx.fillStyle='#555';
+    ctx.beginPath(); ctx.arc(devX+devW-5, devY+devH*0.08, 4, 0, Math.PI*2); ctx.fill();
+
+    // Short whip antenna on device
+    ctx.strokeStyle='#aaa'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(devX+devW*0.7,devY-devH/2); ctx.lineTo(devX+devW*0.85,devY-devH/2-ts*0.35); ctx.stroke();
+
+    // ── Shadow ────────────────────────────────────────────────────────────────
+    ctx.fillStyle='rgba(0,0,0,0.22)';
+    ctx.beginPath(); ctx.ellipse(2, R*0.4-bob, R*0.6, R*0.18, 0, 0, Math.PI*2); ctx.fill();
+
+    // ── Body ─────────────────────────────────────────────────────────────────
+    const bg=ctx.createRadialGradient(-R*0.25,-R*0.2,0,0,0,R);
+    bg.addColorStop(0,'#3aaa3a'); bg.addColorStop(1,'#0f5010');
+    ctx.beginPath(); ctx.ellipse(0,0,R,R*1.15,0,0,Math.PI*2);
+    ctx.fillStyle=bg; ctx.fill();
 
     // Backpack
-    ctx.fillStyle = '#0d2d0d';
-    ctx.beginPath();
-    ctx.ellipse(0, r * 0.3, r * 0.55, r * 0.65, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Body jacket
-    const bodyGrad = ctx.createRadialGradient(-r * 0.2, -r * 0.2, 0, 0, 0, r);
-    bodyGrad.addColorStop(0, '#2a8a2a');
-    bodyGrad.addColorStop(1, '#0f4a0f');
-    ctx.beginPath();
-    ctx.ellipse(0, 0, r, r * 1.15, 0, 0, Math.PI * 2);
-    ctx.fillStyle = bodyGrad;
-    ctx.fill();
+    ctx.fillStyle='#0d2d0d';
+    ctx.beginPath(); ctx.ellipse(0,R*0.3,R*0.52,R*0.62,0,0,Math.PI*2); ctx.fill();
 
     // Head
-    ctx.fillStyle = '#f4c090';
-    ctx.beginPath(); ctx.arc(0, -r * 0.9, r * 0.38, 0, Math.PI * 2); ctx.fill();
-    // Hair
-    ctx.fillStyle = '#7a4a18';
-    ctx.beginPath(); ctx.arc(0, -r * 1.05, r * 0.3, Math.PI, 0); ctx.fill();
-
-    // Receiver antenna (forward)
-    ctx.strokeStyle = '#ccc'; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(-3, -r * 0.5); ctx.lineTo(-3, -r * 1.9); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(3,  -r * 0.5); ctx.lineTo(3,  -r * 1.9); ctx.stroke();
-    // Crossbar
-    ctx.beginPath(); ctx.moveTo(-ts * 0.22, -r * 1.5); ctx.lineTo(ts * 0.22, -r * 1.5); ctx.stroke();
-
-    // Receiver box (held in hand)
-    if (gameState === STATE.RECEIVER) {
-        ctx.fillStyle = '#333';
-        ctx.fillRect(r * 0.5, -r * 0.3, r * 0.7, r * 0.4);
-        ctx.fillStyle = '#00ff44';
-        ctx.fillRect(r * 0.55, -r * 0.25, r * 0.55, r * 0.15);
-    }
+    ctx.fillStyle='#f4c090';
+    ctx.beginPath(); ctx.arc(0,-R*0.92,R*0.36,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#7a4a18';
+    ctx.beginPath(); ctx.arc(0,-R*1.05,R*0.28,Math.PI,0); ctx.fill();
 
     ctx.restore();
+    ctx.textBaseline='alphabetic'; ctx.textAlign='left';
 }
 
-// ─── Screen overlays ──────────────────────────────────────────────────────────
+// ── NPC ARDF hunters ─────────────────────────────────────────────────────────
+function _drawNPC(ctx, npc, ts, t, gameState) {
+    const R  = ts * 0.23;
+    const px = (npc.x + 0.5) * ts;
+    const py = (npc.y + 0.5) * ts;
 
-function _drawReceiverGlow(ctx, px, py, ts, timestamp) {
-    const pulse = 0.4 + 0.3 * Math.sin(timestamp / 300);
-    const bearing = Player.receiverBearing;
-    const halfAngle = CONFIG.RECEIVER_BEAMWIDTH;
-    const startAngle = (bearing - halfAngle - 90) * Math.PI / 180;
-    const endAngle   = (bearing + halfAngle - 90) * Math.PI / 180;
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(npc.facing * Math.PI / 180);
 
-    const grad = ctx.createRadialGradient(px, py, 0, px, py, ts * CONFIG.FOX_AUDIO_RADIUS * 0.3);
-    grad.addColorStop(0,   `rgba(74,222,128,${pulse * 0.35})`);
-    grad.addColorStop(0.6, `rgba(74,222,128,${pulse * 0.1})`);
-    grad.addColorStop(1,    'rgba(74,222,128,0)');
+    // Yagi antenna
+    const antBase = -R * 1.1, antTop = -R * 1.1 - ts * 2.0;
+    ctx.strokeStyle='#bbbbbb'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(0,antBase); ctx.lineTo(0,antTop); ctx.stroke();
+    const epos=[0.3,0.6]; const elen=[ts*0.42,ts*0.32];
+    for(let i=0;i<2;i++){
+        const ey=antBase+(antTop-antBase)*epos[i];
+        ctx.strokeStyle=i===0?'#ffcc44':'#999';ctx.lineWidth=i===0?2.5:1.5;
+        ctx.beginPath();ctx.moveTo(-elen[i]/2,ey);ctx.lineTo(elen[i]/2,ey);ctx.stroke();
+    }
 
-    ctx.beginPath();
-    ctx.moveTo(px, py);
-    ctx.arc(px, py, ts * CONFIG.FOX_AUDIO_RADIUS * 0.3, startAngle, endAngle);
-    ctx.closePath();
-    ctx.fillStyle = grad;
-    ctx.fill();
+    // Body
+    ctx.fillStyle=npc.color;
+    ctx.beginPath();ctx.ellipse(0,0,R,R*1.1,0,0,Math.PI*2);ctx.fill();
+
+    // Head
+    ctx.fillStyle='#f4c090';
+    ctx.beginPath();ctx.arc(0,-R*0.88,R*0.32,0,Math.PI*2);ctx.fill();
+
+    // Small receiver device
+    ctx.fillStyle='#2a2a2a';
+    ctx.fillRect(R*0.5,-R*0.2,R*0.75,R*0.5);
+    ctx.fillStyle='#00ff88';
+    ctx.font=`${R*0.38}px "Share Tech Mono",monospace`;
+    ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText('RX',R*0.875,-R*0.04);
+
+    ctx.restore();
+
+    // Callsign label (screen-space, not rotated)
+    ctx.fillStyle='rgba(0,0,0,0.65)';
+    ctx.fillRect(px-ts*0.7, py-ts*2.65, ts*1.4, ts*0.38);
+    ctx.fillStyle=npc.color;
+    ctx.font=`bold ${ts*0.28}px "Orbitron",monospace`;
+    ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText(npc.callsign, px, py-ts*2.46);
+    ctx.textBaseline='alphabetic';ctx.textAlign='left';
 }
 
-function _drawVignette(ctx, w, h) {
-    const grad = ctx.createRadialGradient(w / 2, h / 2, h * 0.28, w / 2, h / 2, h * 0.82);
-    grad.addColorStop(0, 'rgba(0,0,0,0)');
-    grad.addColorStop(1, 'rgba(0,0,0,0.5)');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, w, h);
-}
-
-function _drawStatusBar(ctx, w, gameState, timestamp) {
-    // Bar background
-    const barH = 46;
-    ctx.fillStyle = 'rgba(2,8,2,0.82)';
-    ctx.fillRect(0, 0, w, barH);
-    ctx.fillStyle = '#1a4a1a';
-    ctx.fillRect(0, barH, w, 2);
+// ── HUD ───────────────────────────────────────────────────────────────────────
+function _drawHUD(ctx, W, H, gameState, t) {
+    const barH = 50;
+    ctx.fillStyle='rgba(2,8,2,0.88)';
+    ctx.fillRect(0,0,W,barH);
+    ctx.fillStyle='#1a4a1a';
+    ctx.fillRect(0,barH,W,2);
 
     // Title
-    ctx.fillStyle = '#ffd700';
-    ctx.font = 'bold 15px "Orbitron", monospace';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('🦊 WLD FoxWave ARDF', 12, barH / 2);
+    ctx.fillStyle='#ffd700';
+    ctx.font='bold 16px "Orbitron",monospace';
+    ctx.textAlign='left';ctx.textBaseline='middle';
+    ctx.fillText('🦊 WLD FoxWave ARDF',14,25);
 
     // Timer
-    ctx.fillStyle = '#4ade80';
-    ctx.font = 'bold 22px "Share Tech Mono", monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('⏱ ' + Player.getElapsedString(), w / 2, barH / 2);
+    ctx.fillStyle='#4ade80';
+    ctx.font='bold 22px "Share Tech Mono",monospace';
+    ctx.textAlign='center';
+    ctx.fillText('⏱ '+Player.getElapsedString(),W/2,25);
 
     // Fox count
-    ctx.fillStyle = '#ffd700';
-    ctx.font = 'bold 15px "Orbitron", monospace';
-    ctx.textAlign = 'right';
-    ctx.fillText(`🦊 ${Player.foundFoxes.size} / ${CONFIG.FOX_COUNT}`, w - 12, barH / 2);
+    ctx.fillStyle='#ffd700';
+    ctx.font='bold 16px "Orbitron",monospace';
+    ctx.textAlign='right';
+    ctx.fillText(`🦊 ${Player.foundFoxes.size}/${CONFIG.FOX_COUNT}`,W-14,25);
 
-    // Mode pill
-    const modes = {
-        [STATE.HUNTING]:  { t: '⚡ HUNTING',  c: '#4ade80' },
-        [STATE.RECEIVER]: { t: '📡 RECEIVER', c: '#ffd700' },
-        [STATE.MAP_VIEW]: { t: '🗺  MAP',     c: '#44aaff' },
-        [STATE.BRIEFING]: { t: '🏕  READY',  c: '#888'    },
-        [STATE.FINISHED]: { t: '🏁 RETURN!', c: '#ff8800' },
+    // Mode label
+    const modes={
+        [STATE.HUNTING]:'▶ HUNTING',[STATE.RECEIVER]:'📡 RECEIVER',
+        [STATE.MAP_VIEW]:'🗺 KAART',[STATE.BRIEFING]:'🏕 KLAAR',
+        [STATE.FINISHED]:'🏁 TERUG!',
     };
-    const m = modes[gameState];
-    if (m) {
-        ctx.fillStyle = m.c;
-        ctx.font = '11px "Share Tech Mono", monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'top';
-        ctx.fillText(m.t, w / 2, barH + 4);
-    }
-    ctx.textBaseline = 'alphabetic';
+    const modeColors={
+        [STATE.HUNTING]:'#4ade80',[STATE.RECEIVER]:'#ffd700',
+        [STATE.MAP_VIEW]:'#44aaff',[STATE.FINISHED]:'#ff8844',
+    };
+    ctx.fillStyle=modeColors[gameState]||'#888';
+    ctx.font='12px "Share Tech Mono",monospace';
+    ctx.textAlign='center';
+    ctx.fillText(modes[gameState]||'',W/2,42);
+
+    // ? hint key reminder
+    ctx.fillStyle='#3a6a3a';
+    ctx.font='11px "Share Tech Mono",monospace';
+    ctx.textAlign='right';
+    ctx.fillText('[?] Vraag hint ON4BB',W-14,42);
+
+    ctx.textBaseline='alphabetic';ctx.textAlign='left';
 }
 
-function _drawReturnBanner(ctx, w, h, timestamp) {
-    const pulse = 0.7 + 0.3 * Math.sin(timestamp / 400);
-    ctx.fillStyle = `rgba(2,8,2,${0.88 * pulse})`;
-    ctx.fillRect(w * 0.15, h - 70, w * 0.70, 54);
-    ctx.strokeStyle = `rgba(255,136,0,${pulse})`;
-    ctx.lineWidth = 2;
-    ctx.strokeRect(w * 0.15, h - 70, w * 0.70, 54);
+// ── ON4BB VHF Hint overlay ────────────────────────────────────────────────────
+function _drawON4BBHint(ctx, W, H, t) {
+    const bw=380, bh=170;
+    const bx=W/2-bw/2, by=H/2-bh/2;
 
-    ctx.fillStyle = `rgba(255,150,0,${pulse})`;
-    ctx.font = 'bold 18px "Orbitron", monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('🏁 Alle vossen! Keer terug naar het WLD-tent!', w / 2, h - 43);
-    ctx.textBaseline = 'alphabetic';
+    // Radio device background
+    const rg=ctx.createLinearGradient(bx,by,bx,by+bh);
+    rg.addColorStop(0,'#1a2a1a');rg.addColorStop(1,'#0a180a');
+    ctx.fillStyle=rg; ctx.roundRect(bx,by,bw,bh,10); ctx.fill();
+    ctx.strokeStyle='#2a6a2a';ctx.lineWidth=2; ctx.stroke();
+
+    // "Radio" header with antenna icon
+    ctx.fillStyle='#ffd700';
+    ctx.font='bold 13px "Orbitron",monospace';
+    ctx.textAlign='center';ctx.textBaseline='top';
+    ctx.fillText('📻  VHF PORTABLE TRANSCEIVER',W/2,by+10);
+
+    // Frequency display
+    ctx.fillStyle='#001500';
+    ctx.fillRect(bx+12,by+34,bw-24,36);
+    ctx.fillStyle='#00ff44';
+    ctx.font='bold 22px "Share Tech Mono",monospace';
+    ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText(`${CONFIG.WLD_VHF_FREQ} MHz  FM`, W/2, by+52);
+
+    ctx.fillStyle='#3a6a3a';
+    ctx.font='10px "Share Tech Mono",monospace';
+    ctx.fillText('WLD CLUBFREQUENTIE 2m', W/2, by+76);
+
+    // Speech bubble divider
+    ctx.strokeStyle='#2a5a2a';ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(bx+16,by+88);ctx.lineTo(bx+bw-16,by+88);ctx.stroke();
+
+    // ON4BB callsign label
+    ctx.fillStyle='#44aaff';
+    ctx.font='bold 13px "Orbitron",monospace';
+    ctx.fillText(CONFIG.ON4BB_CALLSIGN+' zegt:', W/2, by+98);
+
+    // Hint message
+    ctx.fillStyle='#ffffff';
+    ctx.font='bold 14px "Share Tech Mono",monospace';
+    const lines=_wrapText(Player.hintText, 40);
+    lines.forEach((ln,i)=>ctx.fillText(ln,W/2,by+114+i*18));
+
+    // Close hint indicator
+    ctx.fillStyle='#3a5a3a';
+    ctx.font='10px "Share Tech Mono",monospace';
+    ctx.fillText('[?] of [Esc] sluiten',W/2,by+bh-8);
+
+    ctx.textBaseline='alphabetic';ctx.textAlign='left';
+}
+
+function _wrapText(text, maxChars) {
+    const words=text.split(' ');
+    const lines=[];
+    let cur='';
+    for(const w of words){
+        if(cur.length+w.length+1>maxChars){lines.push(cur.trim());cur='';}
+        cur+=w+' ';
+    }
+    if(cur.trim()) lines.push(cur.trim());
+    return lines;
+}
+
+// ── Return-to-tent banner ─────────────────────────────────────────────────────
+function _drawReturnBanner(ctx, W, H, t) {
+    const alpha=0.7+0.3*Math.sin(t/400);
+    ctx.fillStyle=`rgba(2,8,2,${alpha*0.92})`;
+    ctx.fillRect(0,H-70,W,70);
+    ctx.strokeStyle=`rgba(255,215,0,${alpha})`;ctx.lineWidth=2;
+    ctx.strokeRect(0,H-70,W,70);
+    ctx.fillStyle=`rgba(255,215,0,${alpha})`;
+    ctx.font='bold 22px "Orbitron",monospace';
+    ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText('🏁  ALLE VOSSEN GEVONDEN!  Keer terug naar het WLD-tent!',W/2,H-35);
+    ctx.textBaseline='alphabetic';ctx.textAlign='left';
+}
+
+function _drawVignette(ctx, W, H) {
+    const g=ctx.createRadialGradient(W/2,H/2,H*0.28,W/2,H/2,H*0.82);
+    g.addColorStop(0,'rgba(0,0,0,0)');g.addColorStop(1,'rgba(0,0,0,0.48)');
+    ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
 }
