@@ -130,9 +130,12 @@
         <p class="text-gold" style="font-family:'Orbitron',monospace;font-size:1.1rem;margin:12px 0;">
             Keer terug naar het WLD-tent om te finishen!
         </p>
-        <p class="text-dim">Loop terug naar het <strong class="text-gold">gouden startpunt</strong> linksonder op de kaart.</p>
+        <p class="text-dim" style="margin-bottom:16px;">
+            Loop terug naar het <strong class="text-gold">gouden startpunt</strong> links­onder op de kaart.<br>
+            De start/stop machine registreert je eindtijd automatisch.
+        </p>
         <div class="btn-row">
-            <button onclick="document.getElementById('overlay-finished').classList.add('hidden')" class="btn btn-green">⬅  TERUG NAAR SPEL</button>
+            <button id="btn-back-to-game" class="btn btn-green">⬅  TERUG NAAR SPEL</button>
         </div>
     </div>
 </div>
@@ -161,7 +164,7 @@
 <script src="js/player.js"></script>
 <script src="js/beacons.js"></script>
 <script src="js/receiver.js"></script>
-<script src="js/renderer.js"></script>
+<script src="js/renderer3d.js"></script>
 <script src="js/mapView.js"></script>
 <script src="js/ui.js"></script>
 <script src="js/certificate.js"></script>
