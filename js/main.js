@@ -1,15 +1,18 @@
 /**
- * main.js - Game loop, state machine, input (keyboard + mouse + pointer lock)
+ * main.js - Game loop, state machine, input
  * WLD FoxWave ARDF
- *
- * FIXES:
- *  1. audioEngine.tick() called every frame regardless of state → morse never stops
- *  2. No audioEngine.stop() on state transitions → only on game-end
- *  3. Pointer lock mouse for 3D look + mouse click to move forward
- *  4. WASD keys in addition to arrow keys
- *  5. Receiver state: init audio once, then tick() handles everything
  */
 "use strict";
+
+// ── Global error display ──────────────────────────────────────────────────────
+window.onerror = function(msg, src, line, col, err) {
+    const el = document.getElementById('js-error');
+    if (el) {
+        el.style.display = 'block';
+        el.textContent = '⚠ JS ERROR: ' + msg + ' [' + (src||'').split('/').pop() + ':' + line + ']';
+    }
+    console.error('[Game Error]', msg, src, line, col, err);
+};
 
 let mainCanvas, mainCtx;
 let rightTopCanvas, rtCtx;
@@ -22,14 +25,26 @@ let _gameFinished    = false;
 
 // ── Boot ───────────────────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
-    _setupCanvases();
-    _setupOverlays();
-    _setupKeyboard();
-    _setupMouse();
-    buildParkMap();
-    loadRendererAssets(() => console.log('[Assets] loaded'));
-    showSplash();
-    requestAnimationFrame(_loop);
+    // Dismiss loading screen
+    const lm = document.getElementById('loading-msg');
+    if (lm) lm.classList.add('gone');
+
+    try {
+        _setupCanvases();
+        _setupOverlays();
+        _setupKeyboard();
+        _setupMouse();
+        buildParkMap();
+        loadRendererAssets(() => console.log('[Assets] loaded'));
+        showSplash();
+        requestAnimationFrame(_loop);
+    } catch(e) {
+        const el = document.getElementById('js-error');
+        if (el) { el.style.display='block'; el.textContent='⚠ INIT ERROR: '+e.message; }
+        console.error('[Init Error]', e);
+        // Still try to show splash as fallback
+        try { showSplash(); } catch(_) {}
+    }
 });
 
 // ── Canvas ─────────────────────────────────────────────────────────────────────
@@ -110,8 +125,12 @@ function _startHunting() {
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
 function _loop(ts) {
-    _update(ts);
-    _render(ts);
+    try {
+        _update(ts);
+        _render(ts);
+    } catch(e) {
+        console.error('[Loop error]', e);
+    }
     requestAnimationFrame(_loop);
 }
 

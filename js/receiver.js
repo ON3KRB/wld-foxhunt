@@ -107,8 +107,7 @@ function _drawMagLoop(ctx, W, H, bearing, sig) {
 
     // Capacitor tuning box at top of loop
     ctx.fillStyle = '#2a2a2a';
-    ctx.roundRect(-16, -R - 14, 32, 16, 3);
-    if (ctx.roundRect) ctx.fill(); else { ctx.fillRect(-16,-R-14,32,16); }
+    ctx.beginPath(); ctx.roundRect(-16, -R - 14, 32, 16, 3); ctx.fill();
     ctx.strokeStyle = '#555'; ctx.lineWidth = 1; ctx.stroke();
     // Capacitor label
     ctx.fillStyle = '#aaa';
@@ -198,8 +197,7 @@ function _drawMagLoop(ctx, W, H, bearing, sig) {
     const dg = ctx.createLinearGradient(devX, devY, devX, devY+devH);
     dg.addColorStop(0, '#2a2a2a'); dg.addColorStop(1, '#181818');
     ctx.fillStyle = dg;
-    ctx.roundRect(devX, devY, devW, devH, 4);
-    ctx.fill();
+    ctx.beginPath(); ctx.roundRect(devX, devY, devW, devH, 4); ctx.fill();
     ctx.strokeStyle = '#3a3a3a'; ctx.lineWidth = 1; ctx.stroke();
 
     // Headphone jack

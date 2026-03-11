@@ -6,12 +6,34 @@
     <title>WLD FoxWave ARDF</title>
     <link rel="stylesheet" href="css/style.css"/>
     <style>
-        /* Prevent right-click context menu on canvas */
         #canvas-main { cursor: crosshair; }
-        #canvas-main:hover { cursor: crosshair; }
+        /* Loading fallback shown until JS runs */
+        #loading-msg {
+            position: fixed; inset: 0;
+            background: #020a02;
+            display: flex; align-items: center; justify-content: center;
+            z-index: 999; color: #4ade80;
+            font-family: 'Share Tech Mono', monospace; font-size: 1.1rem;
+            flex-direction: column; gap: 12px;
+        }
+        #loading-msg.gone { display: none; }
+        #js-error {
+            position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+            background: #400; color: #f88; padding: 12px 20px; border-radius: 6px;
+            font-family: monospace; font-size: 13px; z-index: 9999;
+            display: none; max-width: 90vw; word-break: break-all;
+        }
     </style>
 </head>
 <body>
+
+<!-- Visible immediately before any JS loads -->
+<div id="loading-msg">
+    <div style="font-size:2rem">🦊</div>
+    <div>WLD FoxWave ARDF — laden...</div>
+</div>
+<!-- JS error display -->
+<div id="js-error"></div>
 
 <div id="game-wrapper">
     <div id="panel-main"><canvas id="canvas-main"></canvas></div>

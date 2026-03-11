@@ -526,6 +526,8 @@ function _drawReceiverHands(ctx, W, H, t) {
     ctx.restore(); // end bob translate
     ctx.textBaseline='alphabetic'; ctx.textAlign='left';
 }
+
+function _drawSpriteNPC(ctx, dx, dy, sw, sh, npc, tY, zBuf, W, t) {
     const cx=dx+sw/2;
     if(cx<0||cx>W) return;
     const ci=Math.floor(cx);
