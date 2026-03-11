@@ -381,7 +381,17 @@ function _kReceiver(k, dn){
     if(k==='a'&&dn) Player.rotateReceiver(-CONFIG.RECEIVER_ROTATE_STEP);
     if(k==='d'&&dn) Player.rotateReceiver(+CONFIG.RECEIVER_ROTATE_STEP);
     if(dn){
-        switch(k.toUpperCase()){
+        const ku = k.toUpperCase();
+        // Y = lock bearing on map, return to hunting
+        if(ku==='Y'){
+            Player.addBearingLine(Player.receiverBearing);
+            Player.receiverOn=false; gameState=STATE.HUNTING;
+            return;
+        }
+        // N = just return to hunting without saving
+        if(ku==='N'){ Player.receiverOn=false; gameState=STATE.HUNTING; return; }
+
+        switch(ku){
             case 'R': Player.receiverOn=false; gameState=STATE.HUNTING; break;
             case 'H': Player.receiverOn=false; gameState=STATE.HUNTING; break;
             case 'M': gameState=STATE.MAP_VIEW; break;

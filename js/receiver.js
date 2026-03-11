@@ -79,13 +79,38 @@ function drawReceiverPanel(ctx, W, H) {
         ctx.fillText('— geen signaal —', W/2, codeY + 18);
     }
 
-    // ── Footer ─────────────────────────────────────────────────────────────────
-    ctx.fillStyle = '#1a3a1a';
-    ctx.font = '10px "Share Tech Mono", monospace';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-    ctx.fillText('← →  antenne draaien  ·  R = terug', W/2, H - 3);
+    // ── Footer: bearing lock prompt ──────────────────────────────────────────
+    const now = performance.now();
+    const pulse = 0.6 + 0.4 * Math.sin(now / 420);
 
-    ctx.textBaseline = 'alphabetic';
+    // Box
+    ctx.fillStyle = `rgba(0,18,0,0.95)`;
+    ctx.fillRect(0, H - 58, W, 58);
+    ctx.strokeStyle = `rgba(255,215,0,${pulse})`;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(1, H - 57, W - 2, 56);
+
+    // Title
+    ctx.fillStyle = `rgba(255,215,0,${pulse})`;
+    ctx.font = 'bold 12px "Orbitron", monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillText('LOCK BEARING?', W / 2, H - 52);
+
+    // Bearing value big
+    ctx.fillStyle = '#4ade80';
+    ctx.font = 'bold 18px "Share Tech Mono", monospace';
+    ctx.fillText(String(Math.round(Player.receiverBearing)).padStart(3, '0') + '°  →  kaart', W / 2, H - 36);
+
+    // Y / N buttons
+    ctx.font = 'bold 13px "Orbitron", monospace';
+    ctx.fillStyle = '#22c55e';
+    ctx.textAlign = 'left';
+    ctx.fillText('[Y] JA — vastleggen', W * 0.08, H - 17);
+    ctx.fillStyle = '#888';
+    ctx.textAlign = 'right';
+    ctx.fillText('[N] NEE', W * 0.92, H - 17);
+
+    ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'left';
 }
 
 // ── Magnetic Loop Antenna ─────────────────────────────────────────────────────
