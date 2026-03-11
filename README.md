@@ -19,7 +19,7 @@ The player uses:
 
 ---
 
-## 🚀 GitHub Pages Deployment
+## GitHub Pages Deployment
 
 ### Option A — Upload directly
 1. Fork or clone this repository
@@ -63,7 +63,7 @@ wld-foxhunt/
 
 ---
 
-## 🎯 How to Play
+## How to Play
 
 | Key | Action |
 |-----|--------|
@@ -89,7 +89,7 @@ wld-foxhunt/
 
 ---
 
-## 🏗 Technical Notes
+## Technical Notes
 
 ### Architecture
 - **Pure vanilla JS** — no frameworks, no bundler
@@ -114,13 +114,13 @@ Foxes are placed randomly on walkable tiles at game start, with:
 
 ---
 
-## 🔊 Audio / Browser Policy
+## Audio / Browser Policy
 
 Web Audio requires a user gesture before starting. The first keypress or button click automatically initialises the audio context — no extra action needed.
 
 ---
 
-## 🏆 ARDF Fox Codes (standard)
+## ARDF Fox Codes (standard)
 
 | Fox | Code | Morse |
 |-----|------|-------|
@@ -132,7 +132,7 @@ Web Audio requires a user gesture before starting. The first keypress or button 
 
 ---
 
-## 📜 Credits
+## Credits
 
 - **WLD Radio Amateur Club** — concept & branding
 - Game design & development: WLD FoxWave ARDF project
@@ -140,6 +140,6 @@ Web Audio requires a user gesture before starting. The first keypress or button 
 
 ---
 
-## 📄 License
+## License
 
 MIT — free to use, adapt and redistribute with attribution to WLD Radio Amateur Club.
