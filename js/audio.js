@@ -1,10 +1,19 @@
 /**
- * audio.js - Web Audio API CW (morse) tone engine
+ * audio.js - Web Audio API CW morse tone engine (v3 - bug-fixed)
  * WLD FoxWave ARDF
  *
- * Uses the Web Audio API scheduling system for sample-accurate morse timing.
- * Generates a sine-wave CW tone with smooth envelope to avoid clicks.
- * Volume is set per-playback based on signal strength (0–1).
+ * Architecture:
+ *  - Single persistent OscillatorNode running at all times
+ *  - Signal GainNode carries the on/off morse envelope
+ *  - Master GainNode carries signal strength (volume)
+ *  - RAF-based look-ahead scheduler (no setTimeout drift)
+ *
+ * Bug fixes vs v2:
+ *  - cancelScheduledValues() called before every new pattern → no double-envelope
+ *  - _schedulingLock flag prevents RAF + update() double-schedule race
+ *  - Hysteresis on signal threshold (rise: 0.04, fall: 0.015) → no flicker
+ *  - stop() + immediate play() safe: new pattern starts 100ms after stop
+ *  - Fox-code switch: old scheduled events cancelled before new ones added
  */
 
 "use strict";
@@ -12,122 +21,220 @@
 class AudioEngine {
     constructor() {
         /** @type {AudioContext|null} */
-        this.ctx = null;
-        /** @type {GainNode|null} */
-        this.masterGain = null;
+        this.ctx          = null;
+        /** @type {OscillatorNode|null} */
+        this._osc         = null;
+        /** @type {GainNode|null} morse envelope (0/1) */
+        this._sigGain     = null;
+        /** @type {GainNode|null} signal strength volume */
+        this._masterGain  = null;
 
-        this._isInitialized = false;
-        this._isPlaying     = false;
-        this._loopHandle    = null;   // setTimeout for repeat loop
+        this._isInitialized  = false;
+        this._isPlaying      = false;
 
-        this._currentFoxCode   = null;
-        this._currentVolume    = 0;
-        this._scheduleAheadMs  = 150; // schedule this far ahead of playback
+        this._currentFoxCode = null;
+        this._currentVolume  = 0;
+
+        /** Absolute AudioContext time where the NEXT pattern begins */
+        this._nextPatternTime = 0;
+
+        /** RAF handle */
+        this._rafHandle   = null;
+        /** Look-ahead window in seconds */
+        this._lookAhead   = 0.35;
+
+        /**
+         * Lock to prevent RAF tick and external call scheduling simultaneously.
+         * Only one _schedulePattern() runs per scheduler cycle.
+         */
+        this._schedulingLock = false;
+
+        /**
+         * Hysteresis thresholds so we don't toggle audio on every frame
+         * at the signal boundary.
+         */
+        this._THRESHOLD_ON  = 0.04;  // signal must be ABOVE this to start
+        this._THRESHOLD_OFF = 0.015; // signal must drop BELOW this to stop
+
+        /** True when signal is currently above threshold */
+        this._signalActive = false;
     }
 
-    // ─── Initialization ───────────────────────────────────────────────────────
+    // ─── Init ────────────────────────────────────────────────────────────────
 
     /**
-     * Must be called from a user-gesture handler (click/keydown) to satisfy
-     * browser autoplay policy.
+     * Create and wire the audio graph.
+     * Must be called from a user-gesture (click / keydown).
      */
     init() {
-        if (this._isInitialized) return;
-        this.ctx = new (window.AudioContext || window.webkitAudioContext)();
-        this.masterGain = this.ctx.createGain();
-        this.masterGain.gain.value = 0;
-        this.masterGain.connect(this.ctx.destination);
-        this._isInitialized = true;
-    }
-
-    // ─── Public API ───────────────────────────────────────────────────────────
-
-    /**
-     * Start playing a fox morse code on loop.
-     * @param {string} foxCode  e.g. 'MOE'
-     * @param {number} volume   0–1 signal strength
-     */
-    play(foxCode, volume) {
-        if (!this._isInitialized) this.init();
-        if (this.ctx.state === 'suspended') this.ctx.resume();
-
-        this._currentFoxCode = foxCode;
-        this._currentVolume  = Math.max(0, Math.min(1, volume));
-
-        if (!this._isPlaying) {
-            this._isPlaying = true;
-            this._scheduleLoop();
-        }
-    }
-
-    /**
-     * Smoothly update signal volume without interrupting the morse sequence.
-     * @param {string} foxCode
-     * @param {number} volume
-     */
-    update(foxCode, volume) {
-        if (!this._isInitialized) return;
-        const newVol = Math.max(0, Math.min(1, volume));
-
-        // If fox changed, restart
-        if (foxCode !== this._currentFoxCode) {
-            this.stop();
-            this.play(foxCode, newVol);
+        if (this._isInitialized) {
+            if (this.ctx.state === 'suspended') this.ctx.resume();
             return;
         }
-        this._currentVolume  = newVol;
-        this._currentFoxCode = foxCode;
+
+        this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+
+        // Master gain — controlled by signal strength
+        this._masterGain = this.ctx.createGain();
+        this._masterGain.gain.value = 0;          // start silent
+        this._masterGain.connect(this.ctx.destination);
+
+        // Signal (envelope) gain — morse on/off
+        this._sigGain = this.ctx.createGain();
+        this._sigGain.gain.value = 0;
+        this._sigGain.connect(this._masterGain);
+
+        // Single persistent oscillator
+        this._osc = this.ctx.createOscillator();
+        this._osc.type = 'sine';
+        this._osc.frequency.value = CONFIG.MORSE_FREQUENCY;
+        this._osc.connect(this._sigGain);
+        this._osc.start();
+
+        this._isInitialized = true;
+        console.log('[Audio] AudioContext created, sampleRate:', this.ctx.sampleRate);
+    }
+
+    // ─── Public API ──────────────────────────────────────────────────────────
+
+    /**
+     * Called every frame with the current dominant signal.
+     * Handles hysteresis, start, stop, volume and fox-code switching.
+     * This is the ONLY method main.js needs to call — replaces separate
+     * play() / update() / stop() calls from the game loop.
+     *
+     * @param {string|null} foxCode  dominant fox code, or null if no signal
+     * @param {number}      signal   0–1 signal strength
+     */
+    tick(foxCode, signal) {
+        if (!this._isInitialized) return;
+        if (this.ctx.state === 'suspended') this.ctx.resume();
+
+        // ── Hysteresis ───────────────────────────────────────────────────────
+        if (!this._signalActive && signal >= this._THRESHOLD_ON) {
+            this._signalActive = true;
+        } else if (this._signalActive && signal < this._THRESHOLD_OFF) {
+            this._signalActive = false;
+        }
+
+        if (!this._signalActive || !foxCode) {
+            // Fade out and stop
+            if (this._isPlaying) this._stopInternal();
+            return;
+        }
+
+        // ── Start or switch ──────────────────────────────────────────────────
+        if (!this._isPlaying) {
+            this._startInternal(foxCode, signal);
+            return;
+        }
+
+        // Fox code changed → cancel old envelope, restart
+        if (foxCode !== this._currentFoxCode) {
+            this._cancelAndRestart(foxCode, signal);
+            return;
+        }
+
+        // Same fox → just update volume
+        this._currentVolume = signal;
+        this._applyVolume(signal);
     }
 
     /**
-     * Stop the morse playback immediately.
+     * Hard stop — called when leaving receiver mode.
      */
     stop() {
-        this._isPlaying = false;
-        if (this._loopHandle) {
-            clearTimeout(this._loopHandle);
-            this._loopHandle = null;
-        }
-        if (this.ctx) {
-            this.masterGain.gain.cancelScheduledValues(this.ctx.currentTime);
-            this.masterGain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.05);
-        }
+        this._signalActive = false;
+        this._stopInternal();
     }
 
-    // ─── Internal Scheduling ─────────────────────────────────────────────────
+    // ─── Internal ────────────────────────────────────────────────────────────
 
-    /**
-     * Schedule one full morse pattern and queue the next via setTimeout.
-     */
-    _scheduleLoop() {
+    _startInternal(foxCode, signal) {
+        this._currentFoxCode  = foxCode;
+        this._currentVolume   = signal;
+        this._isPlaying       = true;
+        this._nextPatternTime = this.ctx.currentTime + 0.06;
+
+        this._applyVolume(signal);
+        this._cancelGainEvents();          // clean slate
+        this._schedulePattern();
+        this._startRAF();
+
+        console.log('[Audio] Start:', foxCode, 'vol:', signal.toFixed(2));
+    }
+
+    _stopInternal() {
         if (!this._isPlaying) return;
+        this._isPlaying      = false;
+        this._currentFoxCode = null;
 
-        const pattern  = getFoxPattern(this._currentFoxCode);
-        const vol      = this._currentVolume * CONFIG.AUDIO_MAX_VOLUME;
-        const unit     = CONFIG.MORSE_UNIT_MS / 1000; // seconds
-        const startAt  = this.ctx.currentTime + (this._scheduleAheadMs / 1000);
+        if (this._rafHandle) {
+            cancelAnimationFrame(this._rafHandle);
+            this._rafHandle = null;
+        }
 
-        const endTime = this._schedulePattern(pattern, startAt, vol);
+        if (this._sigGain && this.ctx) {
+            this._cancelGainEvents();
+            this._sigGain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.015);
+        }
 
-        // Total duration of this cycle in ms
-        const cycleDuration = (endTime - startAt) * 1000
-                            + CONFIG.MORSE_REPEAT_PAUSE;
+        this._applyVolume(0);
+    }
 
-        // Schedule next cycle
-        this._loopHandle = setTimeout(() => this._scheduleLoop(), cycleDuration);
+    _cancelAndRestart(foxCode, signal) {
+        // Cancel all pending envelope events
+        this._cancelGainEvents();
+        // Small gap so the old tone decays cleanly
+        this._currentFoxCode  = foxCode;
+        this._currentVolume   = signal;
+        this._nextPatternTime = this.ctx.currentTime + 0.08;
+
+        this._applyVolume(signal);
+        this._schedulePattern();
+        // RAF is already running
+    }
+
+    // ─── Scheduler ───────────────────────────────────────────────────────────
+
+    _startRAF() {
+        if (this._rafHandle) cancelAnimationFrame(this._rafHandle);
+
+        const tick = () => {
+            if (!this._isPlaying) return;
+
+            if (!this._schedulingLock &&
+                this._nextPatternTime < this.ctx.currentTime + this._lookAhead) {
+                this._schedulingLock = true;
+                this._schedulePattern();
+                this._schedulingLock = false;
+            }
+
+            this._rafHandle = requestAnimationFrame(tick);
+        };
+
+        this._rafHandle = requestAnimationFrame(tick);
     }
 
     /**
-     * Schedule a pattern of morse symbols starting at `startTime` (AudioContext time).
-     * Returns the end time of the pattern.
-     * @param {string[]} pattern
-     * @param {number}   startTime
-     * @param {number}   volume
-     * @returns {number} end AudioContext time
+     * Schedule the full morse pattern starting at this._nextPatternTime.
+     * Uses gain.setValueAtTime / linearRampToValueAtTime for sample-accurate
+     * on/off keying with 5ms soft edges.
+     *
+     * Advances this._nextPatternTime past the pattern + repeat pause.
      */
-    _schedulePattern(pattern, startTime, volume) {
-        const unit = CONFIG.MORSE_UNIT_MS / 1000;
-        const unitDurations = {
+    _schedulePattern() {
+        if (!this._currentFoxCode) return;
+
+        const pattern = getFoxPattern(this._currentFoxCode);
+        if (!pattern || pattern.length === 0) return;
+
+        const unit  = CONFIG.MORSE_UNIT_MS / 1000;   // seconds per dit
+        const ramp  = 0.005;                          // 5ms soft key edge
+        const gain  = this._sigGain.gain;
+
+        // Duration map (in units)
+        const dur = {
             [SYM.DIT]: 1,
             [SYM.DAH]: 3,
             [SYM.EG]:  1,
@@ -135,48 +242,47 @@ class AudioEngine {
             [SYM.WG]:  7,
         };
 
-        let t = startTime;
+        let t = this._nextPatternTime;
 
         for (const sym of pattern) {
-            const dur = (unitDurations[sym] || 1) * unit;
+            const d = (dur[sym] || 1) * unit;
 
             if (sym === SYM.DIT || sym === SYM.DAH) {
-                this._scheduleBeep(t, dur, volume);
+                // Soft on
+                gain.setValueAtTime(0, t);
+                gain.linearRampToValueAtTime(1, t + ramp);
+                // Hold
+                if (d > ramp * 2) {
+                    gain.setValueAtTime(1, t + d - ramp);
+                }
+                // Soft off
+                gain.linearRampToValueAtTime(0, t + d);
             }
-            // Silences (EG, CG, WG) need no scheduling — they are simply gaps
-            t += dur;
+            // Silences: no events needed — gain stays at 0
+
+            t += d;
         }
 
-        return t;
+        // Next pattern starts after silence (repeat pause)
+        this._nextPatternTime = t + (CONFIG.MORSE_REPEAT_PAUSE / 1000);
+    }
+
+    /** Cancel all future events on the signal gain. */
+    _cancelGainEvents() {
+        if (!this._sigGain || !this.ctx) return;
+        const t = this.ctx.currentTime;
+        this._sigGain.gain.cancelScheduledValues(t);
+        this._sigGain.gain.setValueAtTime(0, t);
     }
 
     /**
-     * Schedule a single CW beep with soft attack/release to prevent clicks.
-     * @param {number} startTime  AudioContext time
-     * @param {number} duration   seconds
-     * @param {number} volume     0–1
+     * Smoothly set master volume.
+     * @param {number} vol 0–1 signal strength
      */
-    _scheduleBeep(startTime, duration, volume) {
-        const ctx     = this.ctx;
-        const freq    = CONFIG.MORSE_FREQUENCY;
-        const ramp    = Math.min(0.006, duration * 0.1); // 6 ms envelope
-
-        const osc  = ctx.createOscillator();
-        const gain = ctx.createGain();
-
-        osc.type            = 'sine';
-        osc.frequency.value = freq;
-        osc.connect(gain);
-        gain.connect(this.masterGain);
-
-        // Smooth envelope
-        gain.gain.setValueAtTime(0, startTime);
-        gain.gain.linearRampToValueAtTime(volume, startTime + ramp);
-        gain.gain.setValueAtTime(volume, startTime + duration - ramp);
-        gain.gain.linearRampToValueAtTime(0, startTime + duration);
-
-        osc.start(startTime);
-        osc.stop(startTime + duration + 0.01);
+    _applyVolume(vol) {
+        if (!this._masterGain || !this.ctx) return;
+        const target = vol * CONFIG.AUDIO_MAX_VOLUME;
+        this._masterGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.06);
     }
 
     // ─── Getters ─────────────────────────────────────────────────────────────

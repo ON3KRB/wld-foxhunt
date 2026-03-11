@@ -33,7 +33,7 @@ const Player = {
 
     // ─── Input state ──────────────────────────────────────────────────────────
     /** Which direction keys are currently held */
-    keysHeld: { up: false, down: false, left: false, right: false },
+    keysHeld: { up: false, down: false, left: false, right: false, strafeL: false, strafeR: false },
 
     /** Timestamp of last movement step */
     _lastMoveTime: 0,
@@ -61,7 +61,7 @@ const Player = {
         this.foundFoxes      = new Set();
         this.bearingLines    = [];
         this._bearingLineIdCounter = 0;
-        this.keysHeld        = { up: false, down: false, left: false, right: false };
+        this.keysHeld        = { up: false, down: false, left: false, right: false, strafeL: false, strafeR: false };
         this._lastMoveTime   = 0;
         this.gameStartTime   = null;
         this.gameEndTime     = null;
@@ -179,3 +179,62 @@ const Player = {
             && Math.abs(this.y - CONFIG.PLAYER_START_Y) <= 1.5;
     },
 };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 3D RAYCASTING EXTENSIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+Object.assign(Player, {
+
+    /** First-person view angle (degrees, 0=North, 90=East, clockwise) */
+    viewAngle: 0,
+
+    /**
+     * Move forward (+) or backward (-) in view direction with collision.
+     * Separates X/Y so player slides along walls.
+     * @param {number} dist  tiles (positive = forward)
+     */
+    moveForward(dist) {
+        const rad = this.viewAngle * Math.PI / 180;
+        const dx  = Math.sin(rad) * dist;
+        const dy  = -Math.cos(rad) * dist;
+        const r   = RC.COLLISION_R;
+
+        // X component
+        if (!isSolid3D(this.x + dx + Math.sign(dx) * r, this.y)) this.x += dx;
+        // Y component
+        if (!isSolid3D(this.x, this.y + dy + Math.sign(dy) * r)) this.y += dy;
+
+        // Clamp to world bounds
+        this.x = Math.max(0.5, Math.min(CONFIG.WORLD_WIDTH  - 0.5, this.x));
+        this.y = Math.max(0.5, Math.min(CONFIG.WORLD_HEIGHT - 0.5, this.y));
+    },
+
+    /**
+     * Strafe left (-) or right (+) perpendicular to view direction.
+     * @param {number} dist  tiles
+     */
+    strafe(dist) {
+        const rad = (this.viewAngle + 90) * Math.PI / 180;
+        const dx  = Math.sin(rad) * dist;
+        const dy  = -Math.cos(rad) * dist;
+        const r   = RC.COLLISION_R;
+
+        if (!isSolid3D(this.x + dx + Math.sign(dx) * r, this.y)) this.x += dx;
+        if (!isSolid3D(this.x, this.y + dy + Math.sign(dy) * r)) this.y += dy;
+    },
+
+    /**
+     * Rotate the view left (-) or right (+).
+     * @param {number} deltaDeg
+     */
+    rotateView(deltaDeg) {
+        this.viewAngle = ((this.viewAngle + deltaDeg) % 360 + 360) % 360;
+        this.facing    = this.viewAngle; // keep 2D facing in sync
+    },
+
+    /** Reset also resets 3D angle */
+    reset3D() {
+        this.viewAngle = 0;  // face north into park
+    },
+});

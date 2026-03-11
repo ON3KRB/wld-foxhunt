@@ -22,18 +22,18 @@ const CONFIG = {
 
     // ─── Fox Beacons ───────────────────────────────────────────────────────
     FOX_COUNT:                     5,
-    FOX_DETECTION_RADIUS:        2.8,  // tiles — proximity to "find" a fox
-    FOX_AUDIO_RADIUS:             22,  // tiles — max range for audio signal
-    FOX_MIN_DIST_FROM_START:      12,  // tiles — minimum spawn distance from start
-    FOX_MIN_DIST_FROM_EACH_OTHER:  9,  // tiles — minimum distance between foxes
+    FOX_DETECTION_RADIUS:        3.5,  // tiles — proximity to "find" a fox (wider = easier)
+    FOX_AUDIO_RADIUS:             26,  // tiles — max range for audio signal
+    FOX_MIN_DIST_FROM_START:      10,  // tiles — minimum spawn distance from start
+    FOX_MIN_DIST_FROM_EACH_OTHER:  8,  // tiles — minimum distance between foxes
 
     // ARDF standard fox identification codes
     FOX_CODES: ['MOE', 'MOI', 'MOS', 'MOH', 'MO5'],
     FOX_COLORS: ['#ff4d4d', '#ffcc00', '#44ff88', '#44aaff', '#ff44ff'],
 
     // ─── Receiver / Compass ────────────────────────────────────────────────
-    RECEIVER_ROTATE_STEP: 5,    // degrees per arrow key press
-    RECEIVER_BEAMWIDTH:   55,   // degrees half-beamwidth (half-power point)
+    RECEIVER_ROTATE_STEP: 3,    // degrees per arrow key press (smoother)
+    RECEIVER_BEAMWIDTH:   50,   // degrees half-beamwidth
 
     // ─── Morse Code Audio ──────────────────────────────────────────────────
     MORSE_UNIT_MS:      85,    // ms per dit  (~12 WPM)
@@ -100,3 +100,32 @@ const STATE = {
     FINISHED:     'finished',
     CERTIFICATE:  'certificate',
 };
+
+// ─── Raycasting 3D ──────────────────────────────────────────────────────────
+const RC = {
+    FOV:          66,      // degrees field of view
+    MOVE_SPEED:   0.055,   // tiles per frame (at 60fps ≈ 3.3 tiles/sec)
+    ROT_SPEED:    2.4,     // degrees per frame
+    STRAFE_SPEED: 0.040,   // tiles per frame for strafing (Q/E keys)
+    COLLISION_R:  0.28,    // collision radius in tiles
+    MAX_DIST:     30,      // max ray distance
+    FOG_START:    8,       // distance (tiles) fog begins
+    FOG_END:      26,      // distance fully fogged
+};
+
+// Tiles that block raycasting (appear as walls)
+const SOLID_3D = new Set([
+    TILE.TREE, TILE.DENSE_TREE,
+    TILE.WATER, TILE.BUILDING,
+    TILE.FOUNTAIN,
+]);
+
+/**
+ * Returns true if the tile at (tx,ty) is a solid wall for 3D raycasting.
+ * @param {number} tx
+ * @param {number} ty
+ * @returns {boolean}
+ */
+function isSolid3D(tx, ty) {
+    return SOLID_3D.has(getTile(Math.floor(tx), Math.floor(ty)));
+}

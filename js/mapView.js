@@ -1,68 +1,78 @@
 /**
- * mapView.js - Park map overview and bearing line renderer
+ * mapView.js - Park overview map + bearing line UI (v2)
  * WLD FoxWave ARDF
  *
- * Draws the park as a small overhead map in the right-top panel.
- * Also handles bearing line input display and management.
+ * Improvements:
+ *  - Player-centred minimap with smooth pan
+ *  - Cleaner bearing input UI with live preview line
+ *  - Intersections highlighted where bearing lines cross
+ *  - Tooltip labels for park features
+ *  - Delete buttons repositioned for easier clicking
  */
 
 "use strict";
 
-// Tile colours for the minimap (simplified palette)
 const MAP_COLORS = {
-    [TILE.GRASS]:       '#4a7c3f',
-    [TILE.PATH]:        '#c8a060',
-    [TILE.TREE]:        '#2d5a1f',
-    [TILE.WATER]:       '#2b6cb0',
-    [TILE.BUILDING]:    '#7a5c2e',
-    [TILE.PLAYGROUND]:  '#d4770a',
-    [TILE.FOUNTAIN]:    '#3498db',
-    [TILE.TRAIN]:       '#c8a060',
-    [TILE.ZOO]:         '#5a8a2a',
-    [TILE.START]:       '#ffd700',
-    [TILE.DENSE_TREE]:  '#1a3a10',
-    [TILE.FLOWER]:      '#6aae52',
-    [TILE.SHRUB]:       '#3a6a20',
+    [TILE.GRASS]:       '#3d6634',
+    [TILE.PATH]:        '#b89050',
+    [TILE.TREE]:        '#254a18',
+    [TILE.WATER]:       '#1f5898',
+    [TILE.BUILDING]:    '#6a4c24',
+    [TILE.PLAYGROUND]:  '#b86005',
+    [TILE.FOUNTAIN]:    '#2a86c8',
+    [TILE.TRAIN]:       '#b89050',
+    [TILE.ZOO]:         '#4a7520',
+    [TILE.START]:       '#e8c800',
+    [TILE.DENSE_TREE]:  '#162d0c',
+    [TILE.FLOWER]:      '#5a9242',
+    [TILE.SHRUB]:       '#326020',
 };
 
+// Store clickable delete-button hit areas for mouse handling
+let _deleteBtnAreas = [];
+
 /**
- * Draw the full park overview map.
+ * Draw the park overview map panel.
  * @param {CanvasRenderingContext2D} ctx
- * @param {number} width   canvas width
- * @param {number} height  canvas height
+ * @param {number} width
+ * @param {number} height
  */
 function drawMapPanel(ctx, width, height) {
-    const W  = CONFIG.WORLD_WIDTH;
-    const H  = CONFIG.WORLD_HEIGHT;
+    const W = CONFIG.WORLD_WIDTH;
+    const H = CONFIG.WORLD_HEIGHT;
+    const UI_H   = 118;
+    const TITLE_H = 24;
+    const mapH   = height - UI_H - TITLE_H;
 
-    // Reserve bottom area for bearing input UI
-    const UI_H  = 110;
-    const mapH  = height - UI_H;
-
-    // Calculate tile size to fit map
+    // ── Calculate tile size ───────────────────────────────────────────────────
     const ts = Math.min(
         Math.floor(width  / W),
         Math.floor(mapH   / H)
     );
-    const mapDisplayW = ts * W;
-    const mapDisplayH = ts * H;
-    const offX = Math.floor((width - mapDisplayW) / 2);
-    const offY = 4;
+    const mapW = ts * W;
+    const mH   = ts * H;
+    const offX = Math.floor((width - mapW) / 2);
+    const offY = TITLE_H + 4;
 
     // Background
-    ctx.fillStyle = '#050f05';
+    ctx.fillStyle = '#030a03';
     ctx.fillRect(0, 0, width, height);
 
-    // Title
+    // Title bar
+    ctx.fillStyle = '#0a1a0a';
+    ctx.fillRect(0, 0, width, TITLE_H);
     ctx.fillStyle = '#ffd700';
-    ctx.font = 'bold 13px "Orbitron", monospace';
+    ctx.font = 'bold 12px "Orbitron", monospace';
     ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    ctx.fillText('🗺  PARK MAP', width / 2, 4);
+    ctx.textBaseline = 'middle';
+    ctx.fillText('🗺  KAART · PARK OVERZICHT', width / 2, TITLE_H / 2);
 
-    // ── Draw tiles ────────────────────────────────────────────────────────────
+    // ── Tiles ─────────────────────────────────────────────────────────────────
     ctx.save();
-    ctx.translate(offX, offY + 20);
+    ctx.beginPath();
+    ctx.rect(offX, offY, mapW, mH);
+    ctx.clip();
+    ctx.translate(offX, offY);
 
     for (let ty = 0; ty < H; ty++) {
         for (let tx = 0; tx < W; tx++) {
@@ -72,214 +82,300 @@ function drawMapPanel(ctx, width, height) {
         }
     }
 
-    // ── Draw bearing lines ────────────────────────────────────────────────────
+    // ── Bearing lines ─────────────────────────────────────────────────────────
     for (const line of Player.bearingLines) {
-        _drawBearingLine(ctx, line, ts);
+        _drawBearingLine(ctx, line, ts, W, H);
     }
 
-    // ── Draw feature labels ───────────────────────────────────────────────────
-    if (ts >= 5) {
-        _drawMapFeatureLabels(ctx, ts);
+    // Live preview (if typing a bearing)
+    if (Player.bearingInput.length > 0) {
+        const previewBearing = parseInt(Player.bearingInput, 10) || 0;
+        _drawBearingLine(ctx, {
+            fromX: Player.x, fromY: Player.y,
+            bearing: previewBearing,
+            color: 'rgba(255,255,255,0.4)',
+            id: -1,
+        }, ts, W, H, true);
     }
 
-    // ── Draw player position ─────────────────────────────────────────────────
+    // ── Intersection hints ────────────────────────────────────────────────────
+    if (Player.bearingLines.length >= 2) {
+        _drawIntersections(ctx, Player.bearingLines, ts, W, H);
+    }
+
+    // ── Feature labels ────────────────────────────────────────────────────────
+    if (ts >= 4) _drawFeatureLabels(ctx, ts);
+
+    // ── Found foxes ───────────────────────────────────────────────────────────
+    for (const b of getFoundBeacons()) {
+        const bx = b.x * ts + ts / 2;
+        const by = b.y * ts + ts / 2;
+        ctx.fillStyle = b.color;
+        ctx.beginPath(); ctx.arc(bx, by, Math.max(3, ts * 1.2), 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+        if (ts >= 4) {
+            ctx.font = `bold ${Math.max(6, ts * 1.1)}px "Orbitron", monospace`;
+            ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+            ctx.fillText(b.code, bx, by - ts * 0.8);
+        }
+    }
+
+    // ── Player dot ────────────────────────────────────────────────────────────
     _drawPlayerDot(ctx, Player.x, Player.y, ts);
 
-    // ── Draw found fox markers ────────────────────────────────────────────────
-    for (const b of getFoundBeacons()) {
-        _drawFoxDot(ctx, b.x, b.y, b.color, ts);
+    // ── Receiver beam direction (if in receiver mode) ─────────────────────────
+    if (window.gameState === STATE.RECEIVER) {
+        _drawReceiverBeam(ctx, Player.x, Player.y, ts);
     }
 
     ctx.restore();
 
+    // ── Map border ────────────────────────────────────────────────────────────
+    ctx.strokeStyle = '#1a4a1a'; ctx.lineWidth = 1;
+    ctx.strokeRect(offX, offY, mapW, mH);
+
     // ── Bearing input UI ─────────────────────────────────────────────────────
-    _drawBearingInputUI(ctx, width, height, UI_H);
+    _drawBearingUI(ctx, width, height, UI_H);
 
     ctx.textBaseline = 'alphabetic';
 }
 
-// ─── Internal helpers ─────────────────────────────────────────────────────────
+// ─── Map drawing helpers ──────────────────────────────────────────────────────
 
-function _drawBearingLine(ctx, line, ts) {
+function _drawBearingLine(ctx, line, ts, W, H, dashed = false) {
     const { fromX, fromY, bearing, color } = line;
-    const len = Math.max(CONFIG.WORLD_WIDTH, CONFIG.WORLD_HEIGHT) * 2;
-
+    const len = Math.max(W, H) * 2;
     const rad = (bearing - 90) * Math.PI / 180;
     const x1  = fromX * ts + ts / 2;
     const y1  = fromY * ts + ts / 2;
     const x2  = x1 + Math.cos(rad) * len * ts;
     const y2  = y1 + Math.sin(rad) * len * ts;
 
+    ctx.save();
     ctx.strokeStyle = color;
-    ctx.lineWidth   = 2;
-    ctx.setLineDash([5, 3]);
-    ctx.globalAlpha = 0.85;
-    ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
-    ctx.stroke();
+    ctx.lineWidth   = dashed ? 1.5 : 2;
+    ctx.globalAlpha = dashed ? 0.6 : 0.9;
+    ctx.setLineDash(dashed ? [4, 4] : [6, 3]);
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
     ctx.setLineDash([]);
-    ctx.globalAlpha = 1;
 
-    // Origin dot
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(x1, y1, 3, 0, Math.PI * 2);
-    ctx.fill();
+    // Origin marker
+    ctx.globalAlpha = 1;
+    ctx.fillStyle   = color;
+    ctx.beginPath(); ctx.arc(x1, y1, Math.max(2.5, ts * 0.6), 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+}
+
+function _drawIntersections(ctx, lines, ts, W, H) {
+    for (let i = 0; i < lines.length; i++) {
+        for (let j = i + 1; j < lines.length; j++) {
+            const pt = _lineIntersection(lines[i], lines[j], ts, W, H);
+            if (pt) {
+                // Pulsing yellow dot at intersection
+                const pulse = 0.6 + 0.4 * Math.sin(Date.now() / 500);
+                ctx.beginPath();
+                ctx.arc(pt.x, pt.y, 5 + pulse * 2, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(255,215,0,${0.25 * pulse})`;
+                ctx.fill();
+                ctx.beginPath();
+                ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
+                ctx.fillStyle = '#ffd700';
+                ctx.fill();
+                ctx.strokeStyle = '#fff'; ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+        }
+    }
+}
+
+function _lineIntersection(a, b, ts, W, H) {
+    const toRad = deg => (deg - 90) * Math.PI / 180;
+    const ax1 = a.fromX * ts + ts / 2, ay1 = a.fromY * ts + ts / 2;
+    const bx1 = b.fromX * ts + ts / 2, by1 = b.fromY * ts + ts / 2;
+    const ax2 = ax1 + Math.cos(toRad(a.bearing)) * W * ts * 2;
+    const ay2 = ay1 + Math.sin(toRad(a.bearing)) * H * ts * 2;
+    const bx2 = bx1 + Math.cos(toRad(b.bearing)) * W * ts * 2;
+    const by2 = by1 + Math.sin(toRad(b.bearing)) * H * ts * 2;
+
+    const dxa = ax2 - ax1, dya = ay2 - ay1;
+    const dxb = bx2 - bx1, dyb = by2 - by1;
+    const denom = dxa * dyb - dya * dxb;
+    if (Math.abs(denom) < 0.001) return null;
+
+    const t = ((bx1 - ax1) * dyb - (by1 - ay1) * dxb) / denom;
+    if (t < 0.01 || t > 2) return null;
+
+    const x = ax1 + t * dxa;
+    const y = ay1 + t * dya;
+    if (x < 0 || x > W * ts || y < 0 || y > H * ts) return null;
+    return { x, y };
+}
+
+function _drawFeatureLabels(ctx, ts) {
+    const features = [
+        { tx: 5,  ty: 56, label: 'WLD 🏕', color: '#ffd700' },
+        { tx: 49, ty: 22, label: '⛲',     color: '#88ccff' },
+        { tx: 68, ty: 11, label: '🦁 ZOO', color: '#ffdd88' },
+        { tx: 10, ty: 22, label: '💧',     color: '#88ccff' },
+        { tx: 68, ty: 48, label: '☕',     color: '#ffccaa' },
+        { tx: 39, ty: 3,  label: '🚂',     color: '#ffaa88' },
+        { tx: 10, ty: 10, label: '🎠',     color: '#ffccff' },
+    ];
+    ctx.font = `${Math.max(7, ts * 1.5)}px serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (const f of features) {
+        ctx.fillStyle = f.color;
+        ctx.fillText(f.label, f.tx * ts, f.ty * ts);
+    }
 }
 
 function _drawPlayerDot(ctx, px, py, ts) {
     const x = px * ts + ts / 2;
     const y = py * ts + ts / 2;
+    const r = Math.max(3, ts * 0.8);
 
-    // Pulsing glow
-    const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 400);
-    ctx.beginPath();
-    ctx.arc(x, y, 5 + pulse * 3, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(255,255,255,${0.2 + pulse * 0.2})`;
-    ctx.fill();
+    // Pulse ring
+    const p = 0.5 + 0.5 * Math.sin(Date.now() / 350);
+    ctx.beginPath(); ctx.arc(x, y, r + 3 + p * 4, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,255,255,${p * 0.2})`; ctx.fill();
 
     // Dot
-    ctx.beginPath();
-    ctx.arc(x, y, 4, 0, Math.PI * 2);
-    ctx.fillStyle = '#ffffff';
-    ctx.fill();
-    ctx.strokeStyle = '#00ff88';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff'; ctx.fill();
+    ctx.strokeStyle = '#4ade80'; ctx.lineWidth = 1.5; ctx.stroke();
 
     // Direction arrow
     const rad = (Player.facing - 90) * Math.PI / 180;
-    ctx.strokeStyle = '#00ff88';
-    ctx.lineWidth   = 1.5;
+    ctx.strokeStyle = '#4ade80'; ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(x, y);
-    ctx.lineTo(x + Math.cos(rad) * 8, y + Math.sin(rad) * 8);
+    ctx.lineTo(x + Math.cos(rad) * (r + 5), y + Math.sin(rad) * (r + 5));
     ctx.stroke();
 }
 
-function _drawFoxDot(ctx, fx, fy, color, ts) {
-    const x = fx * ts + ts / 2;
-    const y = fy * ts + ts / 2;
+function _drawReceiverBeam(ctx, px, py, ts) {
+    const cx  = px * ts + ts / 2;
+    const cy  = py * ts + ts / 2;
+    const rad = (Player.receiverBearing - 90) * Math.PI / 180;
+    const len = 30 * ts;
+    const halfAngle = CONFIG.RECEIVER_BEAMWIDTH * Math.PI / 180;
+
+    const lAngle = rad - halfAngle;
+    const rAngle = rad + halfAngle;
 
     ctx.beginPath();
-    ctx.arc(x, y, 4, 0, Math.PI * 2);
-    ctx.fillStyle = color;
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, len, lAngle, rAngle);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(74,222,128,0.08)';
     ctx.fill();
-    ctx.strokeStyle = '#fff';
+    ctx.strokeStyle = 'rgba(74,222,128,0.3)';
     ctx.lineWidth = 1;
     ctx.stroke();
 }
 
-function _drawMapFeatureLabels(ctx, ts) {
-    const labels = [
-        { x: 6,  y: 10, text: 'SPEELTUIN', color: '#ffd700' },
-        { x: 49, y: 22, text: 'FONTEIN',  color: '#4db8e8' },
-        { x: 68, y: 11, text: 'ZOO',       color: '#ffd700' },
-        { x: 10, y: 22, text: 'VIJVER',    color: '#87ceeb' },
-        { x: 68, y: 48, text: 'CAFÉ',      color: '#ffd700' },
-        { x:  5, y: 56, text: 'WLD',       color: '#ffd700' },
-    ];
-    ctx.font = `bold ${Math.max(7, ts * 0.8)}px "Orbitron", monospace`;
-    ctx.textBaseline = 'middle';
-    for (const l of labels) {
-        ctx.fillStyle = l.color;
-        ctx.textAlign = 'center';
-        ctx.fillText(l.text, l.x * ts, l.y * ts);
-    }
-}
-
 // ─── Bearing input UI ─────────────────────────────────────────────────────────
 
-function _drawBearingInputUI(ctx, width, height, uiH) {
+function _drawBearingUI(ctx, width, height, uiH) {
     const y0 = height - uiH;
+    _deleteBtnAreas = [];
 
-    // Separator
-    ctx.fillStyle = '#0d2d0d';
+    // Panel background
+    ctx.fillStyle = '#060e06';
     ctx.fillRect(0, y0, width, uiH);
-    ctx.fillStyle = '#2a5a2a';
+    ctx.fillStyle = '#1a4a1a';
     ctx.fillRect(0, y0, width, 1);
 
     // Title
     ctx.fillStyle = '#4ade80';
-    ctx.font = 'bold 12px "Orbitron", monospace';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    ctx.fillText('📐 ADD BEARING', 8, y0 + 6);
+    ctx.font = 'bold 11px "Orbitron", monospace';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillText('📐 PEILING INVOEREN', 8, y0 + 6);
 
     // Input box
-    const inputVal = Player.bearingInput;
-    const display  = inputVal.length > 0 ? inputVal + '°' : '___°';
+    const inputY = y0 + 22;
+    const inputW = width - 16;
+    const val    = Player.bearingInput;
 
-    ctx.fillStyle = '#0a2a0a';
-    ctx.strokeStyle = '#4ade80';
-    ctx.lineWidth = 1.5;
-    ctx.fillRect(8, y0 + 24, width - 16, 28);
-    ctx.strokeRect(8, y0 + 24, width - 16, 28);
+    ctx.fillStyle = '#040c04';
+    ctx.strokeStyle = val.length > 0 ? '#ffd700' : '#1a4a1a';
+    ctx.lineWidth = val.length > 0 ? 2 : 1;
+    ctx.fillRect(8, inputY, inputW, 26);
+    ctx.strokeRect(8, inputY, inputW, 26);
 
-    ctx.fillStyle = inputVal.length > 0 ? '#ffd700' : '#3a5a3a';
-    ctx.font = 'bold 22px "Share Tech Mono", monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(display, width / 2, y0 + 38);
+    // Value
+    ctx.fillStyle = val.length > 0 ? '#ffd700' : '#2a4a2a';
+    ctx.font = `bold 20px "Share Tech Mono", monospace`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(val.length > 0 ? val + '°' : '___°', width / 2, inputY + 13);
 
-    // Bearing line legend
-    const lines = Player.bearingLines;
-    ctx.font = '10px "Share Tech Mono", monospace';
-    ctx.textBaseline = 'top';
-    const lineY = y0 + 58;
-
-    ctx.fillStyle = '#3a5a3a';
-    ctx.textAlign = 'left';
-    ctx.fillText('Bearing lines: (click 🗑 to delete)', 8, lineY);
-
-    let col = 0;
-    for (const line of lines.slice(0, 6)) {
-        const lx = 8 + col * (width / 3 - 2);
-        const ly = lineY + 14;
-
-        ctx.fillStyle = line.color;
-        ctx.fillRect(lx, ly, 12, 12);
-        ctx.fillStyle = '#aaa';
-        ctx.fillText(`${Math.round(line.bearing)}°`, lx + 15, ly + 1);
-
-        // Delete icon (clickable area stored in UI module)
-        ctx.fillStyle = '#ff4444';
-        ctx.fillText('✕', lx + 38, ly + 1);
-
-        col++;
-        if (col >= 3) { col = 0; }
+    // [Enter] hint
+    if (val.length > 0) {
+        ctx.fillStyle = '#4ade80';
+        ctx.font = '10px "Share Tech Mono", monospace';
+        ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+        ctx.fillText('[↵ Enter]', width - 10, inputY + 13);
     }
 
-    // Controls hint
-    ctx.fillStyle = '#3a5a3a';
+    // Bearing lines list
+    const lines = Player.bearingLines;
+    const listY = inputY + 32;
+
+    ctx.fillStyle = '#2a4a2a';
+    ctx.font = '10px "Share Tech Mono", monospace';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillText(lines.length > 0 ? 'Peilijnen (klik ✕ om te wissen):' : 'Nog geen peilijnen.', 8, listY);
+
+    const colW  = (width - 16) / 3;
+    const rowH  = 18;
+
+    for (let i = 0; i < Math.min(lines.length, 6); i++) {
+        const line = lines[i];
+        const col  = i % 3;
+        const row  = Math.floor(i / 3);
+        const lx   = 8 + col * colW;
+        const ly   = listY + 12 + row * rowH;
+
+        // Colour swatch
+        ctx.fillStyle = line.color;
+        ctx.fillRect(lx, ly + 2, 10, 10);
+
+        // Bearing value
+        ctx.fillStyle = '#a0c8a0';
+        ctx.font = '11px "Share Tech Mono", monospace';
+        ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+        ctx.fillText(`${Math.round(line.bearing)}°`, lx + 13, ly + 1);
+
+        // Delete button
+        const delX = lx + 46, delY = ly;
+        ctx.fillStyle = '#3a0000';
+        ctx.fillRect(delX, delY, 14, 13);
+        ctx.strokeStyle = '#ff4444'; ctx.lineWidth = 1;
+        ctx.strokeRect(delX, delY, 14, 13);
+        ctx.fillStyle = '#ff6666';
+        ctx.font = '9px "Share Tech Mono", monospace';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('✕', delX + 7, delY + 6);
+
+        _deleteBtnAreas.push({ id: line.id, x: delX, y: delY, w: 14, h: 13 });
+    }
+
+    // Key hints at bottom
+    ctx.fillStyle = '#2a4a2a';
     ctx.font = '9px "Share Tech Mono", monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'bottom';
-    ctx.fillText('[0-9] type bearing  [Enter] confirm  [⌫] delete', width / 2, height - 2);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.fillText('[0-9] type peiling   [Enter] lijn   [⌫] wis   [H/M] terug', width / 2, height - 2);
 }
 
 /**
- * Handle a bearing line delete click in map panel.
- * @param {MouseEvent} e  mouse event relative to map panel canvas
- * @param {number} canvasW
- * @param {number} canvasH
+ * Handle click in map panel canvas (delete bearing line buttons).
+ * Exposed for use in main.js.
  */
 function handleMapPanelClick(e, canvasW, canvasH) {
-    const uiH  = 110;
-    const y0   = canvasH - uiH;
-    const lineY = y0 + 58 + 14;
-    const lines = Player.bearingLines;
-
-    for (let i = 0; i < Math.min(lines.length, 6); i++) {
-        const col  = i % 3;
-        const lx   = 8 + col * (canvasW / 3 - 2);
-        const delX = lx + 38;
-        const delY = lineY;
-
-        const mx = e.offsetX, my = e.offsetY;
-        if (mx >= delX && mx <= delX + 12 && my >= delY && my <= delY + 14) {
-            Player.removeBearingLine(lines[i].id);
+    const mx = e.offsetX, my = e.offsetY;
+    for (const btn of _deleteBtnAreas) {
+        if (mx >= btn.x && mx <= btn.x + btn.w && my >= btn.y && my <= btn.y + btn.h) {
+            Player.removeBearingLine(btn.id);
             return;
         }
     }

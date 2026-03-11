@@ -1,37 +1,28 @@
 /**
  * main.js - Game entry point, loop, state machine and input handler
  * WLD FoxWave ARDF
- *
- * Initialises all subsystems, drives the requestAnimationFrame loop,
- * routes keyboard input to the correct handler per game state, and
- * manages state transitions.
  */
 
 "use strict";
 
-// ─── Canvas references ────────────────────────────────────────────────────────
-let mainCanvas, mainCtx;     // left 70% — park view
-let rightTopCanvas, rtCtx;   // right-top — map or compass
-let rightBotCanvas, rbCtx;   // right-bottom — info panel
+let mainCanvas, mainCtx;
+let rightTopCanvas, rtCtx;
+let rightBotCanvas, rbCtx;
 
-// ─── Game state ───────────────────────────────────────────────────────────────
-let gameState = STATE.SPLASH;
+let gameState        = STATE.SPLASH;
 let lastFoxFoundTime = 0;
-let animFrameId = null;
+let animFrameId      = null;
+let _allFoundShown   = false;
+let _gameFinished    = false;
 
-// ─── Initialisation ───────────────────────────────────────────────────────────
-
+// ─── Boot ──────────────────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
     _setupCanvases();
     _setupOverlays();
     _setupKeyboard();
-
     buildParkMap();
     loadRendererAssets(() => console.log('[Assets] Loaded'));
-
     showSplash();
-    gameState = STATE.SPLASH;
-
     _startLoop();
 });
 
@@ -39,11 +30,9 @@ function _setupCanvases() {
     mainCanvas     = document.getElementById('canvas-main');
     rightTopCanvas = document.getElementById('canvas-right-top');
     rightBotCanvas = document.getElementById('canvas-right-bot');
-
     mainCtx = mainCanvas.getContext('2d');
     rtCtx   = rightTopCanvas.getContext('2d');
     rbCtx   = rightBotCanvas.getContext('2d');
-
     _resizeCanvases();
     window.addEventListener('resize', _resizeCanvases);
 }
@@ -51,52 +40,45 @@ function _setupCanvases() {
 function _resizeCanvases() {
     const W = window.innerWidth;
     const H = window.innerHeight;
-
-    mainCanvas.width  = Math.floor(W * 0.70);
-    mainCanvas.height = H;
-
-    rightTopCanvas.width  = Math.floor(W * 0.30);
-    rightTopCanvas.height = Math.floor(H * 0.65);
-
-    rightBotCanvas.width  = Math.floor(W * 0.30);
-    rightBotCanvas.height = Math.floor(H * 0.35);
+    mainCanvas.width       = Math.floor(W * 0.70);
+    mainCanvas.height      = H;
+    rightTopCanvas.width   = Math.floor(W * 0.30);
+    rightTopCanvas.height  = Math.floor(H * 0.65);
+    rightBotCanvas.width   = Math.floor(W * 0.30);
+    rightBotCanvas.height  = Math.floor(H * 0.35);
 }
 
-// ─── Overlay wiring ───────────────────────────────────────────────────────────
-
+// ─── Overlay wiring ────────────────────────────────────────────────────────────
 function _setupOverlays() {
-    // Splash — Start button
     document.getElementById('btn-start-game').addEventListener('click', () => {
         hideSplash();
         showRegistration();
         gameState = STATE.REGISTRATION;
     });
 
-    // Registration — confirm
     document.getElementById('btn-register').addEventListener('click', () => {
-        const nameEl = document.getElementById('input-name');
-        const cs     = document.getElementById('input-callsign');
-        Player.name  = (nameEl.value.trim() || 'Hunter') +
-                       (cs.value.trim() ? ` (${cs.value.trim().toUpperCase()})` : '');
+        const name = document.getElementById('input-name').value.trim() || 'Hunter';
+        const cs   = document.getElementById('input-callsign').value.trim().toUpperCase();
+        Player.name = name + (cs ? ` (${cs})` : '');
         hideRegistration();
         _initNewGame();
         showBriefing();
         gameState = STATE.BRIEFING;
     });
 
-    // Also allow Enter key in registration inputs
-    ['input-name', 'input-callsign'].forEach(id => {
+    ['input-name','input-callsign'].forEach(id =>
         document.getElementById(id).addEventListener('keydown', e => {
             if (e.key === 'Enter') document.getElementById('btn-register').click();
-        });
+        })
+    );
+
+    document.getElementById('btn-hunt').addEventListener('click', _startHunting);
+
+    document.getElementById('btn-back-to-game').addEventListener('click', () => {
+        hideFinishedOverlay();
+        gameState = STATE.HUNTING;
     });
 
-    // Briefing — Start Hunting
-    document.getElementById('btn-hunt').addEventListener('click', () => {
-        _startHunting();
-    });
-
-    // Certificate download
     document.getElementById('btn-download-cert').addEventListener('click', downloadCertificate);
     document.getElementById('btn-play-again').addEventListener('click', () => {
         document.getElementById('overlay-certificate').classList.add('hidden');
@@ -105,20 +87,19 @@ function _setupOverlays() {
         gameState = STATE.SPLASH;
     });
 
-    // Map panel click (for bearing line delete)
     rightTopCanvas.addEventListener('click', (e) => {
-        if (gameState === STATE.MAP_VIEW) {
+        if (gameState === STATE.MAP_VIEW)
             handleMapPanelClick(e, rightTopCanvas.width, rightTopCanvas.height);
-        }
     });
 }
 
-// ─── Game lifecycle ───────────────────────────────────────────────────────────
-
+// ─── Game lifecycle ────────────────────────────────────────────────────────────
 function _initNewGame() {
     Player.reset();
     placeBeacons();
-    console.log('[Game] Initialised. Beacons:', getBeacons().map(b => b.code + '@' + b.x + ',' + b.y));
+    _allFoundShown = false;
+    _gameFinished  = false;
+    console.log('[Beacons]', getBeacons().map(b => `${b.code}@(${b.x},${b.y})`).join(' '));
 }
 
 function _startHunting() {
@@ -128,145 +109,115 @@ function _startHunting() {
     gameState = STATE.HUNTING;
 }
 
-// ─── Main loop ────────────────────────────────────────────────────────────────
-
+// ─── Loop ──────────────────────────────────────────────────────────────────────
 function _startLoop() {
-    const loop = (timestamp) => {
-        _update(timestamp);
-        _render(timestamp);
-        animFrameId = requestAnimationFrame(loop);
-    };
+    const loop = (ts) => { _update(ts); _render(ts); animFrameId = requestAnimationFrame(loop); };
     animFrameId = requestAnimationFrame(loop);
 }
 
 function _update(timestamp) {
-    if (gameState === STATE.HUNTING) {
+    if (gameState === STATE.HUNTING || gameState === STATE.FINISHED) {
         _handleMovement(timestamp);
         _checkFoxDetection();
         _checkFinish();
     }
-
     if (gameState === STATE.RECEIVER) {
         _updateAudio();
         _checkFoxDetection();
+        _checkFinish();
     }
 }
 
 function _render(timestamp) {
-    // Always render main park view (except on overlay-only screens)
     if (gameState !== STATE.SPLASH && gameState !== STATE.REGISTRATION) {
         renderMainView(mainCtx, mainCanvas.width, mainCanvas.height, timestamp, gameState);
     }
-
-    // Right-top panel: compass or map
     if (gameState === STATE.RECEIVER) {
         drawReceiverPanel(rtCtx, rightTopCanvas.width, rightTopCanvas.height);
-    } else if (gameState === STATE.MAP_VIEW) {
-        drawMapPanel(rtCtx, rightTopCanvas.width, rightTopCanvas.height);
-    } else if (gameState === STATE.HUNTING || gameState === STATE.BRIEFING) {
-        // Default: show minimap
+    } else if (gameState !== STATE.SPLASH && gameState !== STATE.REGISTRATION) {
         drawMapPanel(rtCtx, rightTopCanvas.width, rightTopCanvas.height);
     }
-
-    // Right-bottom panel
     if (gameState !== STATE.SPLASH && gameState !== STATE.REGISTRATION) {
         drawInfoPanel(rbCtx, rightBotCanvas.width, rightBotCanvas.height, gameState);
     }
 }
 
-// ─── Movement ─────────────────────────────────────────────────────────────────
-
+// ─── 2D Movement ──────────────────────────────────────────────────────────────
 function _handleMovement(timestamp) {
     const k = Player.keysHeld;
-    let moved = false;
-    if (k.up)    moved = Player.tryMove('up',    timestamp) || moved;
-    if (k.down)  moved = Player.tryMove('down',  timestamp) || moved;
-    if (k.left)  moved = Player.tryMove('left',  timestamp) || moved;
-    if (k.right) moved = Player.tryMove('right', timestamp) || moved;
+    if (k.up)    Player.tryMove('up',    timestamp);
+    if (k.down)  Player.tryMove('down',  timestamp);
+    if (k.left)  Player.tryMove('left',  timestamp);
+    if (k.right) Player.tryMove('right', timestamp);
 }
 
-// ─── Audio update (receiver mode) ────────────────────────────────────────────
-
+// ─── Audio ─────────────────────────────────────────────────────────────────────
 function _updateAudio() {
     const dominant = getDominantSignal(Player.x, Player.y, Player.receiverBearing);
     if (dominant && dominant.signal > 0.02) {
-        if (audioEngine.isPlaying) {
-            audioEngine.update(dominant.beacon.code, dominant.signal);
-        } else {
-            audioEngine.play(dominant.beacon.code, dominant.signal);
-        }
-    } else {
-        if (audioEngine.isPlaying) audioEngine.stop();
+        audioEngine.isPlaying
+            ? audioEngine.update(dominant.beacon.code, dominant.signal)
+            : audioEngine.play(dominant.beacon.code, dominant.signal);
+    } else if (audioEngine.isPlaying) {
+        audioEngine.stop();
     }
 }
 
-// ─── Detection ────────────────────────────────────────────────────────────────
-
+// ─── Detection ─────────────────────────────────────────────────────────────────
 function _checkFoxDetection() {
-    const now = Date.now();
-    if (now - lastFoxFoundTime < 3000) return;  // debounce
-
+    if (Date.now() - lastFoxFoundTime < 3000) return;
     const found = checkFoxDetection(Player.x, Player.y);
     if (found) {
-        lastFoxFoundTime = now;
+        lastFoxFoundTime = Date.now();
         showFoxFoundFlash(found);
-        console.log('[Game] Fox found:', found.code);
+        console.log('[Fox found]', found.code, '— total:', Player.foundFoxes.size);
+        if (Player.allFoxesFound && !_allFoundShown) {
+            _allFoundShown = true;
+            setTimeout(showFinishedOverlay, 2800);
+        }
     }
 }
 
 function _checkFinish() {
-    if (Player.allFoxesFound && Player.atStart && gameState === STATE.HUNTING) {
-        _triggerFinish();
-    }
+    if (!_gameFinished && Player.allFoxesFound && Player.atStart) _triggerFinish();
 }
 
 function _triggerFinish() {
+    if (_gameFinished) return;
+    _gameFinished = true;
     Player.stopTimer();
     audioEngine.stop();
+    hideFinishedOverlay();
     gameState = STATE.FINISHED;
-    setTimeout(() => {
-        showCertificate();
-        gameState = STATE.CERTIFICATE;
-    }, 600);
-    console.log('[Game] Finished! Time:', Player.getElapsedString());
+    console.log('[Finish] Time:', Player.getElapsedString());
+    setTimeout(() => { showCertificate(); gameState = STATE.CERTIFICATE; }, 800);
 }
 
-// ─── Keyboard handling ────────────────────────────────────────────────────────
-
+// ─── Input ─────────────────────────────────────────────────────────────────────
 function _setupKeyboard() {
     document.addEventListener('keydown', _onKeyDown);
     document.addEventListener('keyup',   _onKeyUp);
 }
 
 function _onKeyDown(e) {
-    // Prevent arrow scrolling the page
-    if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) {
-        e.preventDefault();
-    }
-
+    if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) e.preventDefault();
+    if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
     switch (gameState) {
-        case STATE.BRIEFING:
-            _handleBriefingKey(e.key);
-            break;
-        case STATE.HUNTING:
-            _handleHuntingKey(e.key, true);
-            break;
-        case STATE.RECEIVER:
-            _handleReceiverKey(e.key);
-            break;
-        case STATE.MAP_VIEW:
-            _handleMapViewKey(e.key);
-            break;
+        case STATE.BRIEFING:  _handleBriefingKey(e.key);     break;
+        case STATE.HUNTING:   _handleHuntingKey(e.key,true); break;
+        case STATE.FINISHED:  _handleHuntingKey(e.key,true); break;
+        case STATE.RECEIVER:  _handleReceiverKey(e.key);     break;
+        case STATE.MAP_VIEW:  _handleMapViewKey(e.key);      break;
     }
 }
 
 function _onKeyUp(e) {
-    const map = { ArrowUp:'up', ArrowDown:'down', ArrowLeft:'left', ArrowRight:'right' };
-    if (map[e.key]) Player.keysHeld[map[e.key]] = false;
+    const m = {ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right'};
+    if (m[e.key]) Player.keysHeld[m[e.key]] = false;
 }
 
 function _handleBriefingKey(key) {
-    switch (key.toUpperCase()) {
+    switch(key.toUpperCase()) {
         case 'H': _startHunting(); break;
         case 'R': hideBriefing(); audioEngine.init(); gameState = STATE.RECEIVER; break;
         case 'M': hideBriefing(); gameState = STATE.MAP_VIEW; break;
@@ -274,64 +225,42 @@ function _handleBriefingKey(key) {
 }
 
 function _handleHuntingKey(key, down) {
-    const dirMap = { ArrowUp:'up', ArrowDown:'down', ArrowLeft:'left', ArrowRight:'right' };
-    if (dirMap[key]) {
-        Player.keysHeld[dirMap[key]] = down;
-        return;
-    }
-    switch (key.toUpperCase()) {
-        case 'R':
-            audioEngine.init();
-            gameState = STATE.RECEIVER;
-            break;
-        case 'M':
-            gameState = STATE.MAP_VIEW;
-            break;
+    const m = {ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right'};
+    if (m[key] !== undefined) { Player.keysHeld[m[key]] = down; return; }
+    if (!down) return;
+    switch(key.toUpperCase()) {
+        case 'R': audioEngine.init(); gameState = STATE.RECEIVER; break;
+        case 'M': gameState = STATE.MAP_VIEW; break;
     }
 }
 
 function _handleReceiverKey(key) {
-    switch (key) {
+    switch(key) {
         case 'ArrowLeft':  Player.rotateReceiver(-CONFIG.RECEIVER_ROTATE_STEP); break;
         case 'ArrowRight': Player.rotateReceiver(+CONFIG.RECEIVER_ROTATE_STEP); break;
         default:
-            switch (key.toUpperCase()) {
-                case 'R': audioEngine.stop(); gameState = STATE.HUNTING; break;
-                case 'M': audioEngine.stop(); gameState = STATE.MAP_VIEW; break;
-                case 'H': audioEngine.stop(); gameState = STATE.HUNTING; break;
+            switch(key.toUpperCase()) {
+                case 'R': case 'H': audioEngine.stop(); gameState = STATE.HUNTING;  break;
+                case 'M':           audioEngine.stop(); gameState = STATE.MAP_VIEW; break;
             }
     }
 }
 
 function _handleMapViewKey(key) {
     if (key >= '0' && key <= '9') {
-        if (Player.bearingInput.length < 3) {
-            Player.bearingInput += key;
-        }
+        if (Player.bearingInput.length < 3) Player.bearingInput += key;
         return;
     }
-    switch (key) {
-        case 'Backspace':
-            Player.bearingInput = Player.bearingInput.slice(0, -1);
-            break;
+    switch(key) {
+        case 'Backspace': Player.bearingInput = Player.bearingInput.slice(0,-1); break;
         case 'Enter': {
-            const bearing = parseInt(Player.bearingInput, 10);
-            if (!isNaN(bearing) && Player.bearingLines.length < 10) {
-                Player.addBearingLine(bearing);
-            }
+            const b = parseInt(Player.bearingInput, 10);
+            if (!isNaN(b) && Player.bearingLines.length < 10)
+                Player.addBearingLine(b % 360);
             Player.bearingInput = '';
             break;
         }
-        case 'M':
-        case 'm':
-        case 'H':
-        case 'h':
-            gameState = STATE.HUNTING;
-            break;
-        case 'R':
-        case 'r':
-            audioEngine.init();
-            gameState = STATE.RECEIVER;
-            break;
+        case 'M': case 'm': case 'H': case 'h': gameState = STATE.HUNTING; break;
+        case 'R': case 'r': audioEngine.init(); gameState = STATE.RECEIVER; break;
     }
 }

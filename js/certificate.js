@@ -1,225 +1,306 @@
 /**
- * certificate.js - Finish certificate canvas generator
+ * certificate.js - Finish certificate generator (v2)
  * WLD FoxWave ARDF
  *
- * Generates a printable/downloadable certificate on a Canvas element
- * when the player has found all 5 foxes and returned to the start.
+ * Fixes v1 issues:
+ *  - Images pre-loaded via Promise before drawing
+ *  - Canvas size scales to window
+ *  - Richer visual design (gold border, radio waves, morse strip)
+ *  - Download includes player name in filename
  */
 
 "use strict";
 
 /**
- * Draw the completion certificate onto the given canvas.
+ * Pre-load cert images and draw the certificate.
  * @param {HTMLCanvasElement} canvas
+ * @returns {Promise<void>}
  */
-function drawCertificate(canvas) {
-    const W = canvas.width  = 900;
-    const H = canvas.height = 640;
+async function drawCertificate(canvas) {
+    const W = 900, H = 640;
+    canvas.width  = W;
+    canvas.height = H;
     const ctx = canvas.getContext('2d');
 
-    // ── Background gradient ───────────────────────────────────────────────────
-    const bgGrad = ctx.createLinearGradient(0, 0, W, H);
-    bgGrad.addColorStop(0,   '#0a1a08');
-    bgGrad.addColorStop(0.5, '#0f2a0c');
-    bgGrad.addColorStop(1,   '#0a1a08');
-    ctx.fillStyle = bgGrad;
+    // ── Pre-load images (proper async) ────────────────────────────────────────
+    const [logoImg, foxImg] = await Promise.all([
+        _loadImage('assets/wld-logo.png'),
+        _loadImage('assets/fox.png'),
+    ]);
+
+    // ── Background ────────────────────────────────────────────────────────────
+    const bg = ctx.createLinearGradient(0, 0, W, H);
+    bg.addColorStop(0,   '#060e06');
+    bg.addColorStop(0.4, '#0a1c08');
+    bg.addColorStop(1,   '#040c04');
+    ctx.fillStyle = bg;
     ctx.fillRect(0, 0, W, H);
 
+    // Subtle green mesh overlay
+    ctx.fillStyle = 'rgba(74,222,128,0.025)';
+    for (let y = 0; y < H; y += 22)
+        ctx.fillRect(0, y, W, 1);
+    for (let x = 0; x < W; x += 22)
+        ctx.fillRect(x, 0, 1, H);
+
     // ── Decorative border ─────────────────────────────────────────────────────
-    _drawCertBorder(ctx, W, H);
+    _drawBorder(ctx, W, H);
+
+    // ── Radio wave decoration (top right) ────────────────────────────────────
+    _drawRadioWaveDeco(ctx, W - 55, 55);
+
+    // ── Logo top-left ─────────────────────────────────────────────────────────
+    if (logoImg) {
+        ctx.save();
+        ctx.shadowColor = 'rgba(255,215,0,0.5)';
+        ctx.shadowBlur  = 12;
+        ctx.drawImage(logoImg, 50, 42, 80, 80);
+        ctx.restore();
+    }
+
+    // ── Fox image bottom-right ────────────────────────────────────────────────
+    if (foxImg) {
+        ctx.save();
+        ctx.globalAlpha = 0.90;
+        ctx.drawImage(foxImg, W - 155, H - 180, 110, 145);
+        ctx.restore();
+    }
 
     // ── Header ────────────────────────────────────────────────────────────────
-    ctx.fillStyle = '#ffd700';
-    ctx.font      = 'bold 13px "Orbitron", monospace';
+    ctx.fillStyle = '#c8a000';
+    ctx.font      = '700 12px "Orbitron", monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    ctx.fillText('WLD RADIO AMATEUR CLUB', W / 2, 36);
+    ctx.fillText('WLD RADIO AMATEUR CLUB  ·  ON3KC  ·  ARDF VOSSENJACHT', W / 2, 38);
 
     ctx.fillStyle = '#ffd700';
-    ctx.font      = 'bold 38px "Orbitron", monospace';
+    ctx.font      = '900 40px "Orbitron", monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('WLD FoxWave ARDF', W / 2, 58);
+    ctx.textBaseline = 'top';
+    ctx.shadowColor = 'rgba(255,215,0,0.35)';
+    ctx.shadowBlur  = 18;
+    ctx.fillText('WLD FoxWave ARDF', W / 2, 60);
+    ctx.shadowBlur  = 0;
 
     ctx.fillStyle = '#4ade80';
-    ctx.font      = 'bold 18px "Orbitron", monospace';
-    ctx.fillText('AMATEUR RADIO DIRECTION FINDING — VOSSENJACHT', W / 2, 108);
+    ctx.font      = '700 15px "Orbitron", monospace';
+    ctx.fillText('AMATEUR RADIO DIRECTION FINDING — VOSSENJACHT', W / 2, 112);
 
-    // Divider
-    _drawGoldLine(ctx, W * 0.1, W * 0.9, 138);
+    _drawGoldLine(ctx, W * 0.08, W * 0.92, 140);
 
-    // ── "This certifies that" ─────────────────────────────────────────────────
-    ctx.fillStyle = '#aacfaa';
-    ctx.font      = '16px "Share Tech Mono", monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('Dit is om te certificeren dat', W / 2, 162);
+    // ── Certifies that ────────────────────────────────────────────────────────
+    ctx.fillStyle = '#7aaa7a';
+    ctx.font      = '400 15px "Share Tech Mono", monospace';
+    ctx.textBaseline = 'top';
+    ctx.fillText('Dit certificaat bevestigt dat', W / 2, 158);
 
     ctx.fillStyle = '#ffffff';
-    ctx.font      = `bold 36px "Orbitron", monospace`;
-    ctx.fillText(Player.name || 'Anonymous Hunter', W / 2, 200);
+    ctx.font      = '700 34px "Orbitron", monospace';
+    ctx.shadowColor = 'rgba(255,255,255,0.15)';
+    ctx.shadowBlur  = 8;
+    ctx.fillText(Player.name || 'Anonymous Hunter', W / 2, 186);
+    ctx.shadowBlur  = 0;
 
-    ctx.fillStyle = '#aacfaa';
-    ctx.font      = '16px "Share Tech Mono", monospace';
-    ctx.fillText('heeft alle 5 vossen gevonden in de WLD FoxWave ARDF Vossenjacht', W / 2, 244);
+    ctx.fillStyle = '#7aaa7a';
+    ctx.font      = '400 14px "Share Tech Mono", monospace';
+    ctx.fillText('alle 5 radiobakens heeft gevonden in de WLD FoxWave ARDF Vossenjacht', W / 2, 234);
 
-    // ── Fox codes strip ───────────────────────────────────────────────────────
-    _drawFoxCodeStrip(ctx, W, H);
+    // ── Fox code strip ────────────────────────────────────────────────────────
+    _drawFoxStrip(ctx, W);
 
-    // ── Time block ───────────────────────────────────────────────────────────
-    const elapsed  = Player.getElapsedSeconds();
-    const mm       = String(Math.floor(elapsed / 60)).padStart(2, '0');
-    const ss       = String(elapsed % 60).padStart(2, '0');
-    const timeStr  = `${mm}:${ss}`;
-
-    ctx.fillStyle = '#ffd700';
-    ctx.font      = 'bold 14px "Orbitron", monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('TOTALE TIJD', W / 2, 360);
+    // ── Time ──────────────────────────────────────────────────────────────────
+    const elapsed = Player.getElapsedSeconds();
+    const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
+    const ss = String(elapsed % 60).padStart(2, '0');
 
     ctx.fillStyle = '#4ade80';
-    ctx.font      = 'bold 60px "Share Tech Mono", monospace';
-    ctx.fillText(timeStr, W / 2, 430);
-
-    // ── Date ─────────────────────────────────────────────────────────────────
-    const now       = new Date();
-    const dateStr   = now.toLocaleDateString('nl-BE', { weekday:'long', year:'numeric', month:'long', day:'numeric' });
-    const timeOfDay = now.toLocaleTimeString('nl-BE', { hour:'2-digit', minute:'2-digit' });
-
-    ctx.fillStyle = '#aacfaa';
-    ctx.font      = '14px "Share Tech Mono", monospace';
-    ctx.fillText(`${dateStr}  ·  ${timeOfDay}`, W / 2, 462);
-
-    // ── Logos / images ────────────────────────────────────────────────────────
-    _drawImages(ctx, W, H);
-
-    // ── Footer ────────────────────────────────────────────────────────────────
-    _drawGoldLine(ctx, W * 0.1, W * 0.9, 520);
+    ctx.font      = '700 12px "Orbitron", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText('TOTALE TIJD', W / 2, 365);
 
     ctx.fillStyle = '#ffd700';
-    ctx.font      = 'bold 12px "Orbitron", monospace';
+    ctx.font      = '700 58px "Share Tech Mono", monospace';
+    ctx.shadowColor = 'rgba(255,215,0,0.3)';
+    ctx.shadowBlur  = 14;
+    ctx.fillText(`${mm}:${ss}`, W / 2, 386);
+    ctx.shadowBlur  = 0;
+
+    // ── Morse strip decoration ────────────────────────────────────────────────
+    _drawMorseStrip(ctx, W);
+
+    // ── Date / time ───────────────────────────────────────────────────────────
+    const now     = new Date();
+    const dateStr = now.toLocaleDateString('nl-BE', { weekday:'long', year:'numeric', month:'long', day:'numeric' });
+    const timeStr = now.toLocaleTimeString('nl-BE', { hour:'2-digit', minute:'2-digit' });
+
+    ctx.fillStyle = '#7aaa7a';
+    ctx.font      = '400 13px "Share Tech Mono", monospace';
+    ctx.textBaseline = 'top';
+    ctx.fillText(`${dateStr}  ·  ${timeStr}`, W / 2, 466);
+
+    _drawGoldLine(ctx, W * 0.08, W * 0.92, 506);
+
+    // ── Footer ────────────────────────────────────────────────────────────────
+    ctx.fillStyle = '#c8a000';
+    ctx.font      = '700 11px "Orbitron", monospace';
     ctx.textAlign = 'left';
-    ctx.fillText('WLD Radio Amateur Club', W * 0.1, 540);
+    ctx.textBaseline = 'top';
+    ctx.fillText('WLD Radio Amateur Club', 52, 520);
 
     ctx.textAlign = 'right';
-    ctx.fillText('ON3KC · 80m ARDF · Vossenjacht', W * 0.9, 540);
+    ctx.fillText('80m CW ARDF  ·  Vossenjacht Simulator', W - 52, 520);
 
-    ctx.fillStyle = '#3a6a3a';
-    ctx.font      = '11px "Share Tech Mono", monospace';
+    ctx.fillStyle = '#2a5a2a';
+    ctx.font      = '400 10px "Share Tech Mono", monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('WLD FoxWave ARDF — powered by WLD Radio Amateur Club — wld-ardf.github.io', W / 2, 565);
+    ctx.fillText('on3krb.github.io/wld-foxhunt-   ·   WLD FoxWave ARDF   ·   Powered by WLD Radio Amateur Club', W / 2, 542);
 
     ctx.textBaseline = 'alphabetic';
 }
 
-// ─── Internal helpers ─────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function _drawCertBorder(ctx, W, H) {
-    // Outer gold frame
+function _loadImage(src) {
+    return new Promise(resolve => {
+        const img = new Image();
+        img.onload  = () => resolve(img);
+        img.onerror = () => resolve(null);
+        img.src = src;
+    });
+}
+
+function _drawBorder(ctx, W, H) {
+    // Outer double gold frame
     ctx.strokeStyle = '#c8a000';
-    ctx.lineWidth   = 4;
-    ctx.strokeRect(16, 16, W - 32, H - 32);
-
-    // Inner green frame
-    ctx.strokeStyle = '#2a5a2a';
-    ctx.lineWidth   = 2;
-    ctx.strokeRect(24, 24, W - 48, H - 48);
+    ctx.lineWidth   = 3;
+    ctx.strokeRect(14, 14, W - 28, H - 28);
+    ctx.strokeStyle = '#4a2a00';
+    ctx.lineWidth   = 1;
+    ctx.strokeRect(20, 20, W - 40, H - 40);
+    ctx.strokeStyle = '#8a6a00';
+    ctx.lineWidth   = 1;
+    ctx.strokeRect(22, 22, W - 44, H - 44);
 
     // Corner ornaments
-    const corners = [[30,30], [W-30,30], [30,H-30], [W-30,H-30]];
+    const corners = [[24,24],[W-24,24],[24,H-24],[W-24,H-24]];
     for (const [cx, cy] of corners) {
         ctx.fillStyle = '#c8a000';
+        ctx.beginPath(); ctx.arc(cx, cy, 5, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#c8a000'; ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.arc(cx, cy, 6, 0, Math.PI * 2);
-        ctx.fill();
-    }
-
-    // Radio wave pattern at top-right corner
-    ctx.strokeStyle = 'rgba(200,160,0,0.3)';
-    ctx.lineWidth   = 1.5;
-    for (let i = 1; i <= 4; i++) {
+        ctx.moveTo(cx, cy + 8); ctx.lineTo(cx, cy + 20);
+        ctx.moveTo(cx + 8, cy); ctx.lineTo(cx + 20, cy);
+        ctx.stroke();
         ctx.beginPath();
-        ctx.arc(W - 40, 40, i * 14, -Math.PI * 0.7, -Math.PI * 0.1);
+        ctx.moveTo(cx, cy - 8); ctx.lineTo(cx, cy - 20);
+        ctx.moveTo(cx - 8, cy); ctx.lineTo(cx - 20, cy);
         ctx.stroke();
     }
 }
 
-function _drawGoldLine(ctx, x1, x2, y) {
-    const grad = ctx.createLinearGradient(x1, y, x2, y);
-    grad.addColorStop(0,   'transparent');
-    grad.addColorStop(0.3, '#c8a000');
-    grad.addColorStop(0.7, '#c8a000');
-    grad.addColorStop(1,   'transparent');
-    ctx.strokeStyle = grad;
-    ctx.lineWidth   = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(x1, y);
-    ctx.lineTo(x2, y);
-    ctx.stroke();
+function _drawRadioWaveDeco(ctx, cx, cy) {
+    for (let i = 1; i <= 5; i++) {
+        ctx.strokeStyle = `rgba(255,215,0,${0.35 - i * 0.06})`;
+        ctx.lineWidth   = 1.5;
+        ctx.beginPath();
+        ctx.arc(cx, cy, i * 16, -Math.PI * 0.7, -Math.PI * 0.05);
+        ctx.stroke();
+    }
+    ctx.fillStyle = '#ffd700';
+    ctx.beginPath(); ctx.arc(cx, cy, 5, 0, Math.PI * 2); ctx.fill();
 }
 
-function _drawFoxCodeStrip(ctx, W, H) {
-    const stripY = 270;
-    const stripH = 68;
-    const slotW  = (W * 0.7) / CONFIG.FOX_COUNT;
-    const startX = W * 0.15;
+function _drawGoldLine(ctx, x1, x2, y) {
+    const g = ctx.createLinearGradient(x1, y, x2, y);
+    g.addColorStop(0,   'transparent');
+    g.addColorStop(0.25, '#c8a000');
+    g.addColorStop(0.75, '#c8a000');
+    g.addColorStop(1,   'transparent');
+    ctx.strokeStyle = g; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2, y); ctx.stroke();
+}
 
-    ctx.fillStyle = 'rgba(0,20,0,0.5)';
-    ctx.fillRect(startX, stripY, W * 0.7, stripH);
-    ctx.strokeStyle = '#2a5a2a';
-    ctx.lineWidth   = 1;
-    ctx.strokeRect(startX, stripY, W * 0.7, stripH);
+function _drawFoxStrip(ctx, W) {
+    const stripY = 260, stripH = 76;
+    const x1 = W * 0.12, w = W * 0.76;
+    const slotW = w / CONFIG.FOX_COUNT;
+
+    ctx.fillStyle = 'rgba(0,15,0,0.55)';
+    ctx.fillRect(x1, stripY, w, stripH);
+    ctx.strokeStyle = '#2a5a2a'; ctx.lineWidth = 1;
+    ctx.strokeRect(x1, stripY, w, stripH);
 
     for (let i = 0; i < CONFIG.FOX_COUNT; i++) {
         const code  = CONFIG.FOX_CODES[i];
         const color = CONFIG.FOX_COLORS[i];
-        const cx    = startX + i * slotW + slotW / 2;
+        const cx    = x1 + i * slotW + slotW / 2;
 
-        ctx.fillStyle = color;
-        ctx.font      = 'bold 22px "Share Tech Mono", monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'top';
-        ctx.fillText('🦊', cx, stripY + 6);
+        // Colored top bar
+        ctx.fillStyle = color + '44';
+        ctx.fillRect(x1 + i * slotW + 1, stripY + 1, slotW - 2, stripH - 2);
 
+        // Fox emoji
+        ctx.font = '28px serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+        ctx.fillText('🦊', cx, stripY + 8);
+
+        // Code
         ctx.fillStyle = color;
-        ctx.font      = `bold 13px "Orbitron", monospace`;
-        ctx.fillText(code, cx, stripY + 44);
+        ctx.font = `700 13px "Orbitron", monospace`;
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(code, cx, stripY + stripH - 6);
+
+        // Morse dots
+        ctx.fillStyle = color + 'aa';
+        ctx.font = `12px "Share Tech Mono", monospace`;
+        ctx.fillText(getFoxDisplayMorse(code), cx, stripY + stripH - 22);
+
+        // Dividers
+        if (i > 0) {
+            ctx.strokeStyle = '#2a5a2a'; ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(x1 + i * slotW, stripY);
+            ctx.lineTo(x1 + i * slotW, stripY + stripH);
+            ctx.stroke();
+        }
     }
-
     ctx.textBaseline = 'alphabetic';
 }
 
-function _drawImages(ctx, W, H) {
-    // WLD logo bottom left
-    const logo = new Image();
-    logo.onload = () => ctx.drawImage(logo, W * 0.06, H - 140, 90, 90);
-    logo.src    = 'assets/wld-logo.png';
+function _drawMorseStrip(ctx, W) {
+    const y = 456;
+    ctx.fillStyle = '#0a1a0a';
+    ctx.fillRect(W * 0.08, y, W * 0.84, 18);
 
-    // Fox image bottom right
-    const fox = new Image();
-    fox.onload = () => {
-        ctx.save();
-        ctx.drawImage(fox, W * 0.82, H - 155, 100, 130);
-        ctx.restore();
-    };
-    fox.src = 'assets/fox.png';
+    const morseText = '– – – · · · – – – · · – – – · · · – – – · · · ·';
+    ctx.fillStyle = '#2a5a2a';
+    ctx.font      = '11px "Share Tech Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(morseText, W / 2, y + 9);
+    ctx.textBaseline = 'alphabetic';
 }
 
 /**
- * Show the certificate overlay and render the certificate canvas.
+ * Show the certificate overlay and render the certificate.
  */
 function showCertificate() {
     const overlay = document.getElementById('overlay-certificate');
     overlay.classList.remove('hidden');
-    const canvas = document.getElementById('cert-canvas');
-    drawCertificate(canvas);
+    const canvas  = document.getElementById('cert-canvas');
+    // Draw async — shows spinner state naturally
+    drawCertificate(canvas).catch(e => console.error('[Certificate]', e));
 }
 
 /**
- * Trigger a PNG download of the certificate canvas.
+ * Download the certificate as PNG.
  */
 function downloadCertificate() {
     const canvas = document.getElementById('cert-canvas');
     const link   = document.createElement('a');
-    link.download = `WLD-FoxWave-ARDF-${Player.name.replace(/\s+/g,'_')}.png`;
-    link.href    = canvas.toDataURL('image/png');
+    const safeName = (Player.name || 'Hunter').replace(/[^a-zA-Z0-9_\-]/g, '_');
+    link.download = `WLD-FoxWave-ARDF-${safeName}.png`;
+    link.href     = canvas.toDataURL('image/png');
     link.click();
 }
