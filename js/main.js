@@ -134,7 +134,17 @@ function _render(ts) {
     const inGame = gameState!==STATE.SPLASH && gameState!==STATE.REGISTRATION;
 
     if(inGame) {
-        renderMainView(mainCtx, mainCanvas.width, mainCanvas.height, ts, gameState);
+        try {
+            renderMainView(mainCtx, mainCanvas.width, mainCanvas.height, ts, gameState);
+        } catch(e) {
+            console.error('[Main render crash]', e);
+            // At minimum fill with dark so it's not a stale frame
+            mainCtx.fillStyle='#050f05';
+            mainCtx.fillRect(0,0,mainCanvas.width,mainCanvas.height);
+            mainCtx.fillStyle='#ff4444';
+            mainCtx.font='14px monospace';
+            mainCtx.fillText('Render error: '+e.message, 20, 40);
+        }
     }
 
     // Right-top: receiver compass OR map
@@ -367,7 +377,10 @@ function _kMap(k){
         case 'Enter':{
             const b=parseInt(Player.bearingInput,10);
             if(!isNaN(b)&&Player.bearingLines.length<10) Player.addBearingLine(b%360);
-            Player.bearingInput=''; break;
+            Player.bearingInput='';
+            // Auto-return to hunting so arrow keys work immediately
+            gameState=STATE.HUNTING; Player.receiverOn=false;
+            break;
         }
         case 'M':case 'm': gameState=STATE.HUNTING; Player.receiverOn=false; break;
         case 'H':case 'h': gameState=STATE.HUNTING; Player.receiverOn=false; break;

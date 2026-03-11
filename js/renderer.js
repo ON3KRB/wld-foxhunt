@@ -88,7 +88,10 @@ function renderMainView(ctx, W, H, timestamp, gameState) {
     _renderSprites(ctx, W, H, px, py, dirX, dirY, planeX, planeY, planeMag, zBuf, timestamp);
 
     // --- Receiver in hands (weapon-style overlay, only in RECEIVER state) ---
-    if (gameState === STATE.RECEIVER) _drawReceiverHands(ctx, W, H, timestamp);
+    if (gameState === STATE.RECEIVER) {
+        try { _drawReceiverHands(ctx, W, H, timestamp); }
+        catch(e) { console.error('[ReceiverHands]', e); }
+    }
 
     // --- HUD ---
     _drawHUD(ctx, W, H, gameState, timestamp);
@@ -233,7 +236,8 @@ function _renderSprites(ctx, W, H, px, py, dirX, dirY, planeX, planeY, planeMag,
                 _drawSpriteGlow(ctx, drawX, drawY, sprW, sprH, b.color, tY, zBuf, W, t);
             }
         } else if (sp.type === 'tent') {
-            _drawSpriteTent(ctx, drawX, drawY, sprW, sprH, sp.dist, tY, zBuf, W, timestamp);
+            try { _drawSpriteTent(ctx, drawX, drawY, sprW, sprH, sp.dist, tY, zBuf, W, timestamp); }
+            catch(e) { console.error('[Tent sprite]',e); }
         } else if (sp.type === 'npc' && sp.dist < 20) {
             _drawSpriteNPC(ctx, drawX, drawY, sprW, sprH, sp.npc, tY, zBuf, W, t);
         }
@@ -405,7 +409,7 @@ function _drawReceiverHands(ctx, W, H, t) {
     dg.addColorStop(0.5, '#3a3a3a');
     dg.addColorStop(1, '#1a1a1a');
     ctx.fillStyle = dg;
-    ctx.roundRect(bx, by, bw, bh, 8); ctx.fill();
+    ctx.beginPath(); ctx.roundRect(bx, by, bw, bh, 8); ctx.fill();
     ctx.strokeStyle='#4a4a4a'; ctx.lineWidth=1.5; ctx.stroke();
 
     // ── LCD SCREEN ─────────────────────────────────────────────────────────────
@@ -691,7 +695,7 @@ function _drawON4BBHint(ctx, W, H) {
     const rg=ctx.createLinearGradient(bx,by,bx,by+bh);
     rg.addColorStop(0,'#1a2a18'); rg.addColorStop(1,'#0a180a');
     ctx.fillStyle=rg;
-    ctx.roundRect(bx,by,bw,bh,12); ctx.fill();
+    ctx.beginPath(); ctx.roundRect(bx,by,bw,bh,12); ctx.fill();
     ctx.strokeStyle='#44aa44'; ctx.lineWidth=2; ctx.stroke();
 
     // Header — small VHF transceiver label
